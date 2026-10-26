@@ -1,0 +1,9 @@
+# LangGraph 学习框架依赖
+# 安装：pip install -r requirements.txt
+# （本项目使用 conda 环境 hello-agent，已单独安装，此文件用于复现/分享）
+
+langgraph>=1.0            # 图编排框架本体（StateGraph 等）
+langchain>=1.0            # create_agent 等高层封装（LangGraph v1 起在此包）
+langchain-anthropic>=0.3  # Anthropic Claude 集成（ChatAnthropic）
+langchain-openai>=0.3     # OpenAI 集成（ChatOpenAI）
+python-dotenv>=1.0        # 读取 .env 环境变量（API key 等）
