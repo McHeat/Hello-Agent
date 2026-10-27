@@ -7,6 +7,8 @@ Anthropic / OpenAI 只需要改环境变量，代码一行不动。
 控制方式（见 .env.example）：
     LLM_PROVIDER = anthropic | openai   # 默认 anthropic
     LLM_MODEL    = 具体模型名            # 不填则用下面的默认值
+    LLM_BASE_URL = 自定义接口地址         # 接入第三方/本地大模型时用（可选）
+    LLM_API_KEY  = 自定义 API key        # 覆盖 provider 默认 key（可选）
 
 用法：
     from llm import get_model
@@ -46,18 +48,32 @@ def get_model(model: Optional[str] = None) -> BaseChatModel:
             f"找不到 provider={provider!r} 的默认模型，请在 .env 里设置 LLM_MODEL"
         )
 
+    # 可选：自定义接口地址 / API key，用于接入第三方或本地大模型（见 .env.example）
+    base_url = os.getenv("LLM_BASE_URL")
+    api_key = os.getenv("LLM_API_KEY")
+
     if provider == "anthropic":
         # 延迟导入：只装了某个 provider 的 SDK 也不会在加载时出错。
         from langchain_anthropic import ChatAnthropic
 
         # 注意：2026-10 起 Anthropic 系列模型不再接受 temperature/top_p 等采样参数，
         # 这里不传任何采样参数，交给模型自带的 adaptive thinking 自行决策。
-        return ChatAnthropic(model=model_name)
+        kwargs: dict = {"model": model_name}
+        if base_url:
+            kwargs["anthropic_api_url"] = base_url
+        if api_key:
+            kwargs["anthropic_api_key"] = api_key
+        return ChatAnthropic(**kwargs)
 
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(model=model_name, temperature=0)
+        kwargs: dict = {"model": model_name, "temperature": 0}
+        if base_url:
+            kwargs["openai_api_base"] = base_url
+        if api_key:
+            kwargs["openai_api_key"] = api_key
+        return ChatOpenAI(**kwargs)
 
     raise ValueError(f"不支持的 LLM_PROVIDER={provider!r}，可选：anthropic / openai")
 

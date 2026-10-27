@@ -51,6 +51,17 @@ OPENAI_API_KEY=sk-...               # 用 GPT 时填
 
 > 模型通过 `llm.py` 里的工厂层统一创建，**切换提供商只改 `.env`，代码零改动**。
 
+**接入其他大模型（DeepSeek / 通义千问 / Ollama / vLLM 等）**：它们大多提供 OpenAI 兼容接口，在 `.env` 里加三行即可切换：
+
+```ini
+LLM_PROVIDER=openai
+LLM_MODEL=deepseek-chat                   # 对方模型名
+LLM_BASE_URL=https://api.deepseek.com/v1  # 对方接口地址
+LLM_API_KEY=sk-你的key                     # 对方 key
+```
+
+完整示例（DeepSeek、千问、Ollama、vLLM）见 `.env.example`。
+
 ### 3. 运行示例
 
 从**项目根目录**运行（用 `python -m`，保证 `llm.py` 能被正确导入）：
