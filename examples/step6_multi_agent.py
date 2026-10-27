@@ -76,7 +76,7 @@ def supervisor_node(state: SupervisorState) -> dict:
         "- 信息已足够，可以给出最终答案 -> FINISH\n"
         "只回复 researcher、math 或 FINISH，不要解释。"
     ))
-    decision = model.invoke([system] + state["messages"]).content.strip().lower()
+    decision = model.invoke([system] + state["messages"]).text.strip().lower()
 
     if "finish" in decision:
         nxt = "FINISH"
@@ -139,4 +139,4 @@ if __name__ == "__main__":
     question = "LangGraph 是什么？另外帮我算一下 7 乘以 8。"
     result = graph.invoke({"messages": [HumanMessage(content=question)]})
     print("=== 最终答案 ===")
-    print(result["messages"][-1].content)
+    print(result["messages"][-1].text)

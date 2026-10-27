@@ -16,6 +16,7 @@
 """
 from typing import TypedDict
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
@@ -32,7 +33,8 @@ class State(TypedDict):
 def draft_node(state: State) -> dict:
     """让模型写一句初稿。"""
     msg = model.invoke("写一句关于学习 AI 的励志口号（15 字以内，只给口号本身）。")
-    return {"draft": msg.content}
+    # 用 .text 取纯文本：部分模型会返回 thinking 块，此时 .content 是块列表而非字符串
+    return {"draft": msg.text}
 
 
 def review_node(state: State) -> dict:
@@ -67,7 +69,9 @@ builder.add_conditional_edges("review", route, {"publish": "publish", "reject": 
 builder.add_edge("publish", END)
 builder.add_edge("reject", END)
 
-graph = builder.compile()
+# 关键：interrupt / Command(resume) 依赖 checkpointer 保存暂停点，
+# 不传 checkpointer 会报 "Cannot use Command(resume=...) without checkpointer"。
+graph = builder.compile(checkpointer=MemorySaver())
 
 
 if __name__ == "__main__":
