@@ -7,3 +7,19 @@ langchain>=1.0            # create_agent 等高层封装（LangGraph v1 起在�
 langchain-anthropic>=0.3  # Anthropic Claude 集成（ChatAnthropic）
 langchain-openai>=0.3     # OpenAI 集成（ChatOpenAI）
 python-dotenv>=1.0        # 读取 .env 环境变量（API key 等）
+fastapi>=0.115            # Web 框架（cn/jeyuun/main.py 部署用）
+uvicorn[standard]>=0.30   # ASGI 服务器（启动 FastAPI 应用）
+langchain-huggingface>=0.3  # HuggingFaceEmbeddings（官方独立包，替代 langchain-community 的 embeddings）
+langchain-community>=0.4    # 文档加载器 TextLoader/WebBaseLoader/DirectoryLoader（暂无官方独立包，临时沿用；已停更）
+langchain-text-splitters>=0.3  # 文本切分（RAG 用）
+# sentence-transformers    # 可选：HuggingFaceEmbeddings 本地向量化需要（体积较大）
+
+# ---- step8_rag.py 示例依赖（可选，仅跑该示例需要）----
+langchain-deepseek>=0.1    # ChatDeepSeek 集成
+dashscope>=1.16            # 阿里通义千问 embeddings（DashScopeEmbeddings）
+chromadb>=0.5              # 向量数据库（Chroma）
+beautifulsoup4>=4.12       # WebBaseLoader 解析 HTML 需要
+
+# ---- step10_mcp.py 示例依赖（可选，仅跑该示例需要）----
+mcp>=1.0                        # MCP 协议运行时（FastMCP 服务端）
+langchain-mcp-adapters>=0.0.9   # 把 MCP 工具桥接成 LangChain 工具
