@@ -1,0 +1,48 @@
+"""核心抽象层：接口定义、组件注册表、内置实现注册。"""
+from .interfaces import (
+    Cleaner,
+    ContextBuilder,
+    CrossEncoderScorer,
+    DocumentLoader,
+    Embedder,
+    FallbackStrategy,
+    FusionStrategy,
+    ParentChildSplitter,
+    ParentStore,
+    RecallRetriever,
+    Reranker,
+    Stateful,
+    TextCleaner,
+    VectorStore,
+)
+from .registry import (
+    ALL_REGISTRIES,
+    BUILD_ORDER,
+    REQUIRED_COMPONENTS,
+    CLEANER_REGISTRY,
+    CONTEXT_BUILDER_REGISTRY,
+    DENSE_RETRIEVER_REGISTRY,
+    EMBEDDER_REGISTRY,
+    FALLBACK_STRATEGY_REGISTRY,
+    FUSION_REGISTRY,
+    PARENT_STORE_REGISTRY,
+    RERANKER_REGISTRY,
+    Registry,
+    SPARSE_RETRIEVER_REGISTRY,
+    SPLITTER_REGISTRY,
+    VECTOR_STORE_REGISTRY,
+    resolve_references,
+)
+
+__all__ = [
+    "Cleaner", "TextCleaner", "DocumentLoader", "ParentChildSplitter",
+    "Embedder", "VectorStore", "RecallRetriever", "FusionStrategy",
+    "Reranker", "ParentStore", "ContextBuilder", "FallbackStrategy",
+    "CrossEncoderScorer", "Stateful", "Registry",
+    "ALL_REGISTRIES", "BUILD_ORDER", "REQUIRED_COMPONENTS",
+    "FALLBACK_STRATEGY_REGISTRY",
+    "CLEANER_REGISTRY", "CONTEXT_BUILDER_REGISTRY", "DENSE_RETRIEVER_REGISTRY",
+    "EMBEDDER_REGISTRY", "FUSION_REGISTRY", "PARENT_STORE_REGISTRY",
+    "RERANKER_REGISTRY", "SPARSE_RETRIEVER_REGISTRY", "SPLITTER_REGISTRY",
+    "VECTOR_STORE_REGISTRY", "resolve_references",
+]

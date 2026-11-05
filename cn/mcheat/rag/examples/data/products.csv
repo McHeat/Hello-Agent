@@ -1,0 +1,6 @@
+product,category,price,description
+RAG-Starter,入门版,0,零依赖内存向量库与 BM25，适合本地演示和单元测试
+RAG-Chroma,标准版,299,接入 Chroma 持久化向量库，支持跨进程加载索引
+RAG-CrossEncoder,精排版,599,内置交叉编码器精排，把粗召回三十到五十条压到三到五条
+RAG-Golden,评测版,899,附带 Golden Set 回归评测与持续集成指标门禁
+RAG-Enterprise,企业版,1999,支持自定义 Loader、向量库与兜底策略，提供完整诊断日志

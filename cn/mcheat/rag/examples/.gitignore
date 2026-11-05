@@ -1,0 +1,3 @@
+# 运行示例生成的索引产物与基线，不纳入版本控制
+.rag_index/
+baseline.json

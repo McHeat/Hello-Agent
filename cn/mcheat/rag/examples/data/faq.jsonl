@@ -1,0 +1,6 @@
+{"id": "q1", "title": "混合召回怎么配", "category": "召回", "content": "向量检索和 BM25 各召回三十到五十条，用 RRF 融合，再由交叉编码器精排到三到五条进入提示词。"}
+{"id": "q2", "title": "为什么需要父子切分", "category": "切分", "content": "大块混多个主题导致检索粒度粗，小块切断上下文丢失跨句依赖；父子切分用小片段检索、返回大段落，兼顾准与全。"}
+{"id": "q3", "title": "Lost in the Middle 怎么处理", "category": "上下文", "content": "把最相关片段放开头、次相关放结尾、最不相关放中间，形成 U 形分布，并在提示词末尾重复问题。"}
+{"id": "q4", "title": "评测看哪些指标", "category": "评测", "content": "召回阶段看 Context Recall，精排后看 Context Precision，配合几十到几百条人工标注 Golden Set 做回归门禁。"}
+{"id": "q5", "title": "检索不到怎么办", "category": "兜底", "content": "先扩 Top-K 重试，仍不足则转人工或如实说明没有找到相关信息，禁止把空上下文交给大模型编造答案。"}
+{"id": "q6", "title": "RRF 融合的优势", "category": "召回", "content": "RRF 只依赖候选名次，不依赖各通路分数绝对值，因此余弦相似度和 BM25 分数无需归一化就能直接融合。"}

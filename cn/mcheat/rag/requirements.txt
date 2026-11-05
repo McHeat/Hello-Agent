@@ -1,0 +1,30 @@
+# cn.mcheat.rag 依赖说明
+#
+# 【核心链路零第三方依赖】
+# 离线索引 + 在线检索 + 清洗 + 评测 + 测试，全部只用 Python 3.10+ 标准库。
+# 不装本文件里的任何东西，也能直接跑：
+#     python -m cn.mcheat.rag.examples.demo
+#     python -m unittest discover -s cn/mcheat/rag/tests -t .
+#
+# 下面都是「可选适配器」依赖，只在主动切换对应组件时才需要（延迟导入，
+# 缺失时会抛 DependencyMissingError 并给出安装命令，不会在 import 时炸掉）。
+
+# --- 真实 Embedding：components.embedder.name = "langchain" ------------------
+# langchain-huggingface>=0.3     # HuggingFace / sentence-transformers 本地模型
+# sentence-transformers>=3.0     # langchain-huggingface 的底层依赖（体积较大）
+# langchain-openai>=0.3          # OpenAI Embeddings
+# dashscope>=1.16                # 通义千问 DashScope Embeddings
+
+# --- 真正的交叉编码器精排：components.reranker.name = "cross_encoder" --------
+# sentence-transformers>=3.0     # CrossEncoder（如 cross-encoder/ms-marco-MiniLM-L-6-v2）
+
+# --- LangChain 向量库适配器：components.dense_retriever.name = "langchain_chroma"
+# langchain-community>=0.4       # Chroma VectorStore
+# chromadb>=0.5                  # Chroma 后端
+
+# --- PDF Loader：加载 .pdf 文件 ---------------------------------------------
+# pypdf>=5.0                     # 也可向 PdfLoader 注入自定义 text_extractor，完全免依赖
+
+# --- 开发 / 测试（可选）-------------------------------------------------------
+# pytest>=8.0                    # 测试用 unittest 编写，pytest 可直接发现并运行
+# ruff>=0.6                     # 静态检查 / 格式化

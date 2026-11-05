@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "_comment": "RAG 框架默认配置。修改这里或传入用户 JSON 即可替换任意组件；核心链路零第三方依赖。",
+  "components": {
+    "embedder": {
+      "name": "hashing",
+      "params": { "dimension": 256 }
+    },
+    "vector_store": {
+      "name": "memory",
+      "params": { "metric": "cosine" }
+    },
+    "dense_retriever": {
+      "name": "embedding",
+      "params": {
+        "embedder": "@embedder",
+        "vector_store": "@vector_store"
+      }
+    },
+    "sparse_retriever": {
+      "name": "bm25",
+      "params": { "k1": 1.5, "b": 0.75 }
+    },
+    "splitter": {
+      "name": "character",
+      "params": {
+        "parent_size": 1200,
+        "child_size": 240,
+        "child_overlap": 48
+      }
+    },
+    "parent_store": {
+      "name": "memory",
+      "params": {}
+    },
+    "fusion": {
+      "name": "rrf",
+      "params": {
+        "k": 60,
+        "dense_weight": 1.0,
+        "sparse_weight": 1.0
+      }
+    },
+    "reranker": {
+      "name": "lexical",
+      "params": { "coverage_weight": 0.7, "proximity_weight": 0.3 }
+    },
+    "context_builder": {
+      "name": "edges",
+      "params": {
+        "placement": "edges",
+        "expand_to_parent": true,
+        "max_context_chars": 4000
+      }
+    }
+  },
+  "loader": {
+    "recursive": true,
+    "encoding": "utf-8",
+    "fallback_encodings": ["gb18030", "latin-1"],
+    "max_file_size_mb": 20.0
+  },
+  "cleaning": {
+    "steps": [
+      "unicode_normalize",
+      "control_chars",
+      "html_strip",
+      "whitespace",
+      "boilerplate",
+      "drop_empty",
+      "deduplicate"
+    ],
+    "on_error": "raise",
+    "step_params": {},
+    "min_length": 10,
+    "boilerplate_patterns": [
+      "^\\s*第?\\s*\\d+\\s*页(\\s*/\\s*共\\s*\\d+\\s*页)?\\s*$",
+      "^\\s*(copyright|©|版权所有|all rights reserved).*$"
+    ]
+  },
+  "retrieval": {
+    "coarse_top_k": 50,
+    "rerank_top_n": 5,
+    "dense_k": 50,
+    "sparse_k": 50,
+    "min_recall_hits": 3,
+    "min_best_score": 0.0,
+    "enable_dense": true,
+    "enable_sparse": true,
+    "batch_size": 32,
+    "prune_stale": true
+  },
+  "fallback": {
+    "enabled": true,
+    "widen_factor": 2.0,
+    "max_retries": 2,
+    "max_coarse_top_k": 200,
+    "handoff_enabled": true,
+    "no_answer_text": "没有找到相关信息，无法基于现有知识库回答该问题。",
+    "handoff_text": "检索到的资料不足以可靠回答，已转人工处理。",
+    "strategies": ["widen_top_k", "human_handoff", "honest_no_answer"]
+  },
+  "prompt": {
+    "system_instruction": "你是知识库问答助手。请只依据下面提供的资料回答问题，并在句末用 [编号] 标注引用。资料中没有的信息不要编造；若资料不足，请直接说明没有找到相关信息。",
+    "repeat_question_at_tail": true,
+    "context_header": "以下是检索到的资料（按重要性排列，最关键内容位于开头与结尾）：",
+    "question_template": "问题：{query}"
+  },
+  "evaluation": {
+    "id_field": "source",
+    "recall_stage": "coarse",
+    "precision_stage": "final",
+    "max_regression_drop": 0.02
+  }
+}

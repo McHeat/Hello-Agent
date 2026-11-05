@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="可插拔 RAG 框架的项目说明页">
+  <title>可插拔 RAG 框架</title>
+  <style>body { font-family: sans-serif; }</style>
+  <script>console.log('这段脚本不应该进入索引');</script>
+</head>
+<body>
+  <nav><a href="/">首页</a> | <a href="/docs">文档</a></nav>
+  <main>
+    <h1>可插拔 RAG 框架</h1>
+    <p>框架分为离线索引与在线检索两个模块。离线阶段加载五种格式的文档，经过清洗流水线、
+       父子切分后写入向量库、BM25 索引与父块存储。</p>
+    <h2>核心特性</h2>
+    <ul>
+      <li>向量与 BM25 混合召回，RRF 融合后由精排器压到三到五条</li>
+      <li>Small-to-Big 父子切分，小片段检索、大段落返回</li>
+      <li>U 形上下文编排，缓解 Lost in the Middle</li>
+      <li>Golden Set 回归评测，召回与精度分开度量</li>
+      <li>扩 Top-K、转人工、如实回答三级兜底链路</li>
+    </ul>
+    <p>所有组件都通过注册表按配置名装配，替换向量库或精排器不需要改动编排代码。</p>
+  </main>
+  <footer>版权所有 2026 · 本行会被清洗流程剔除</footer>
+</body>
+</html>

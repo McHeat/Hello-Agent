@@ -1,0 +1,46 @@
+{
+  "name": "rag-notes-v1",
+  "_comment": "几十到几百条人工标注回归集；relevant_ids 用文件名，对应 evaluation.id_field=source",
+  "cases": [
+    {
+      "query": "Top-K 为什么不是越大越好，粗召回和精排各留多少条",
+      "relevant_ids": ["rag_notes.md", "faq.jsonl", "about.html"],
+      "notes": "注意事项 1"
+    },
+    {
+      "query": "父子切分 Small-to-Big 是怎么解决 chunk 大小两难的",
+      "relevant_ids": ["rag_notes.md", "faq.jsonl"],
+      "notes": "注意事项 2"
+    },
+    {
+      "query": "Lost in the Middle 应该怎么摆放检索片段",
+      "relevant_ids": ["rag_notes.md", "faq.jsonl", "about.html"],
+      "notes": "注意事项 3"
+    },
+    {
+      "query": "Context Recall 和 Context Precision 分别在哪个阶段计算",
+      "relevant_ids": ["rag_notes.md", "faq.jsonl"],
+      "notes": "注意事项 4"
+    },
+    {
+      "query": "召回不足时有哪些降级手段",
+      "relevant_ids": ["rag_notes.md", "faq.jsonl", "about.html"],
+      "notes": "注意事项 5"
+    },
+    {
+      "query": "RRF 融合为什么不需要归一化分数",
+      "relevant_ids": ["rag_notes.md", "faq.jsonl"],
+      "notes": "混合召回"
+    },
+    {
+      "query": "哪个版本包含 Golden Set 回归评测和指标门禁",
+      "relevant_ids": ["products.csv"],
+      "notes": "精确词匹配，考察 BM25 通路"
+    },
+    {
+      "query": "离线索引阶段包含哪些处理步骤",
+      "relevant_ids": ["about.html", "changelog.txt"],
+      "notes": "跨文档"
+    }
+  ]
+}

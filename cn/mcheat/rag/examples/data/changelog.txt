@@ -1,0 +1,8 @@
+版本 1.0.0
+新增离线索引模块：五种 Document Loader、七步清洗流水线、Small-to-Big 父子切分。
+新增在线检索模块：向量与 BM25 混合粗召回、RRF 融合、精排到三到五条、父块还原。
+新增 Lost in the Middle 上下文编排：高相关片段放首尾，末尾重复问题。
+新增兜底链路：扩 Top-K 重试、转人工、如实说明没有找到相关信息。
+新增 Golden Set 回归评测：Context Recall 与 Context Precision 分阶段量化。
+第 1 页 / 共 1 页
+版权所有 2026
