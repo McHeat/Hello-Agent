@@ -1,0 +1,6 @@
+# MCP 集成框架（cn.mcheat.mcp）依赖
+# 核心（配置/注册表/接口）零第三方依赖；以下为运行 MCP 链路所需。
+# 项目根 requirements.txt 已包含 m>=1.0，此处用于复现/分享。
+
+mcp>=1.0        # MCP 官方 Python SDK（ClientSession / FastMCP / 双传输）
+pyyaml>=6.0     # 可选：YAML 配置文件支持（缺省仅支持 JSON，不影响 import）

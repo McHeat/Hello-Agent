@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "math": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["cn/mcheat/mcp/examples/servers/demo_server.py"],
+      "env": {},
+      "cwd": "."
+    },
+    "notes": {
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_DEMO_TOKEN:-demo-token}"
+      },
+      "timeout": 30.0
+    }
+  }
+}
