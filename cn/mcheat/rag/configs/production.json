@@ -1,0 +1,67 @@
+{
+  "_profile": "production",
+  "_threshold_status": "provisional",
+  "_comment": "中文优先的生产补丁档：仅声明与 defaults.json 的差异。切换模型必须重建索引并重跑 Golden Set 基线。",
+  "_comment_threshold": "retrieval.min_best_score 为【暂行值】：沿用默认栈（lexical + hashing）的 --sweep-threshold 标定结果 0.30，与生产栈（bge-reranker-large + sigmoid）分数分布不同，阈值不可迁移；上线前须按方案 9.4 一次性人工流程用真实 BGE 模型单独扫描复标，回填本文件并更新 --save-baseline 基线。",
+  "_comment_provider": "若使用 DashScope / OpenAI 等云端 embedding provider，缺失项 #9 的重试 / 限流 / 超时尚未实现，调用方需自行在 Embeddings 外层包一层重试，避免离线构建因网络抖动整体失败。",
+  "_comment_rebuild": "RAG_PROFILE=production 会校验 embedder.fingerprint()；指纹变化（含同维度换模型）时必须清空 .rag_index 并重新 index() + save()。",
+  "components": {
+    "query_transformer": {
+      "name": "rule_based",
+      "params": {}
+    },
+    "cache": {
+      "name": "memory",
+      "params": {}
+    },
+    "embedder": {
+      "name": "langchain",
+      "params": {
+        "provider": "huggingface",
+        "model": "BAAI/bge-m3",
+        "prefix_preset": "bge",
+        "query_prefix": "为这个句子生成表示以用于检索相关文章：",
+        "document_prefix": "",
+        "batch_size": 32
+      }
+    },
+    "vector_store": {
+      "name": "sqlite",
+      "params": {
+        "path": "./.rag_index/vectors.sqlite3",
+        "metric": "cosine"
+      }
+    },
+    "parent_store": {
+      "name": "sqlite",
+      "params": {
+        "path": "./.rag_index/parents.sqlite3"
+      }
+    },
+    "reranker": {
+      "name": "cross_encoder",
+      "params": {
+        "model_name": "BAAI/bge-reranker-large",
+        "batch_size": 16
+      }
+    }
+  },
+  "retrieval": {
+    "min_best_score": 0.30,
+    "parallel_recall": true,
+    "recall_timeout_s": 5.0,
+    "max_query_variants": 3,
+    "max_recall_calls": 6
+  },
+  "cache": {
+    "enabled": true,
+    "query_lru_size": 512,
+    "result_ttl_s": 300
+  },
+  "indexing": {
+    "mode": "auto"
+  },
+  "fallback": {
+    "threshold_provisional": true
+  }
+}

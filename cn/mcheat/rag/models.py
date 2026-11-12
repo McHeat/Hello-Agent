@@ -181,14 +181,21 @@ class FusedHit:
 
 @dataclass
 class ScoredChunk:
-    """精排后的候选。只有进入 ``final`` 列表的这些块才会被放进 prompt。"""
+    """精排后的候选。只有进入 ``final`` 列表的这些块才会被放进 prompt。
+
+    分数域约定：``final[].score`` 恒为 ``[0, 1]`` 的归一化分，供
+    ``retrieval.min_best_score`` 质量门禁比较；``raw_score`` 保留精排器
+    原始分，仅供诊断与消融对比。``coarse[].score`` 不在该契约内，见
+    :class:`RetrievalResult`。
+    """
 
     chunk: ChildChunk
-    score: float                        # 精排分数
+    score: float                        # 归一化精排分 [0,1]
     rank: int = 0                       # 精排名次（相关性降序，0 最相关）
     recall_score: float = 0.0           # 融合分，保留供评测 / 调试
     recall_sources: tuple[str, ...] = ()  # 由哪些通路召回
     parent: ParentChunk | None = None   # Small-to-Big 还原出的父块
+    raw_score: float = 0.0              # 精排原始分，仅用于诊断
 
 
 @dataclass
@@ -227,8 +234,8 @@ class FallbackContext:
     stage: str                       # "recall" | "rerank" | "context"
     coarse_count: int                # 粗召回候选数
     final_count: int                 # 精排后候选数
-    best_score: float                # 最高精排分
-    rerank_scores: list[float]
+    best_score: float                # 最高归一化精排分（[0,1]，用于门禁）
+    rerank_scores: list[float]       # 归一化精排分（[0,1]，不是粗召回 RRF 分）
     context_text: str
     attempt: int                     # 当前是第几次（0 表示首次）
     current_top_k: int               # 本次使用的粗召回 Top-K
@@ -285,6 +292,11 @@ class RetrievalResult:
     * ``coarse``：粗召回的 Top-30~50，用于算 Context Recall；
     * ``final`` ：精排后的 Top-3~5，用于算 Context Precision，也是**唯一**
       进入 ``prompt`` 的内容。
+
+    **量纲差异（有意为之，不纳入统一归一化契约）**：``coarse[].score``
+    是 RRF 融合域（``1/(k+rank)``，约 0.016 量级），``final[].score``
+    是 ``[0,1]`` 归一化精排分，两者**不可直接比较**；召回层语义与评测
+    口径因此保持不变。
     """
 
     query: str
@@ -327,6 +339,10 @@ class IndexStats:
     pruned: int = 0
     skipped: list[dict[str, str]] = field(default_factory=list)
     duration_ms: float = 0.0
+    index_version: int = 0          # 每次成功 index() 递增，缓存失效键
+    mode: str = "full"              # full / incremental
+    changed_sources: int = 0        # 增量模式下重建的来源数
+    deleted_chunks: int = 0         # 增量模式下删除的旧块数
 
     def as_dict(self) -> dict[str, Any]:
         """转成可 JSON 序列化的 dict。"""
@@ -340,6 +356,10 @@ class IndexStats:
             "pruned": self.pruned,
             "skipped": self.skipped,
             "duration_ms": round(self.duration_ms, 3),
+            "index_version": self.index_version,
+            "mode": self.mode,
+            "changed_sources": self.changed_sources,
+            "deleted_chunks": self.deleted_chunks,
         }
 
 

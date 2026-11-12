@@ -104,13 +104,26 @@ class TestInMemoryVectorStore(unittest.TestCase):
 
 class TestFileBackedVectorStore(unittest.TestCase):
     def test_persists_across_instances(self):
+        # D7：auto_save 默认改为 False，构建期由 OfflineIndexer 统一 flush；
+        # 直接使用该类时须显式 flush()（README 已显著标注该语义变更）。
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "vectors.json"
             first = FileBackedVectorStore(path=path)
+            self.assertFalse(first.auto_save)
             first.upsert([make_child("a", "甲")], [(1.0, 0.0)])
+            first.flush()
             second = FileBackedVectorStore(path=path)
             self.assertEqual(second.count(), 1)
             self.assertEqual(second.search((1.0, 0.0), k=1)[0].chunk.id, "a")
+
+    def test_auto_save_disabled_does_not_write_per_upsert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vectors.json"
+            store = FileBackedVectorStore(path=path)
+            store.upsert([make_child("a", "甲")], [(1.0, 0.0)])
+            self.assertFalse(path.is_file())
+            store.flush()
+            self.assertTrue(path.is_file())
 
 
 class TestVectorStoreRegistry(unittest.TestCase):

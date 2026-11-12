@@ -15,13 +15,19 @@
         -> VectorStore / DenseRetriever / SparseRetriever  [离线]
     DenseRetriever + SparseRetriever -> FusionStrategy -> Reranker
         -> ParentStore -> ContextBuilder -> FallbackStrategy   [在线]
+
+分数域约定（有意为之）：``RetrievalResult.final[].score`` 恒为 ``[0,1]``
+归一化分，是质量门禁的唯一口径；``RetrievalResult.coarse[].score`` 保持
+RRF 融合域（约 0.016 量级），**不纳入统一契约、不可与 final 直接比较**。
 """
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
+from .._utils import clamp, stable_id
 from ..exceptions import PersistenceNotSupportedError
 from ..models import (
     BuiltContext,
@@ -155,6 +161,15 @@ class Embedder(ABC):
     def embed_query(self, text: str) -> Vector:
         """单条查询向量化。部分模型区分 query/document 前缀，故单独定义。"""
 
+    def fingerprint(self) -> str:
+        """模型指纹：类名 + 维度 + 前缀配置的稳定哈希。
+
+        维度一致但模型/前缀不同也会得到不同指纹，用于拦截「同维度换模型」
+        导致的新旧向量混用。默认实现供自定义 Embedder 平滑升级，内置实现
+        会覆写以纳入模型名与前缀配置。
+        """
+        return stable_id(type(self).__name__, "default", self.dimension, "", "")
+
 
 # ---------------------------------------------------------------------------
 # 可插拔向量库
@@ -207,6 +222,31 @@ class VectorStore(Stateful, ABC):
         """清空（默认基于 :meth:`delete` 实现）。"""
         self.delete(sorted(self.ids()))
 
+    def get_many(self, ids: Sequence[str]) -> dict[str, ChildChunk]:
+        """批量取回子块；默认钩子服务于字典型实现，外部向量库请覆写。
+
+        缺失的 ID 不出现在返回 dict 中。
+        """
+        chunks = getattr(self, "_chunks", None)
+        if not isinstance(chunks, Mapping):
+            return {}
+        return {chunk_id: chunks[chunk_id]
+                for chunk_id in ids if chunk_id in chunks}
+
+    def delete_by_source(self, source: str) -> int:
+        """按来源删除块的默认钩子（**不是增量索引路径的必需依赖**）。
+
+        外部向量库可直接覆写；默认实现基于 :meth:`get_many` 的元数据
+        （``source`` / ``filename``）精确匹配。
+        """
+        matched = [
+            chunk_id for chunk_id, chunk in
+            self.get_many(sorted(self.ids())).items()
+            if source in {chunk.metadata.get("source"),
+                          chunk.metadata.get("filename")}
+        ]
+        return self.delete(matched)
+
 
 class RecallRetriever(Stateful, ABC):
     """一条**召回通路**的统一接口（高层）。
@@ -240,6 +280,14 @@ class RecallRetriever(Stateful, ABC):
     @abstractmethod
     def count(self) -> int:
         """当前条数。"""
+
+    def delete_by_source(self, source: str) -> int:
+        """按来源删除的默认钩子（**不作为增量路径的必需依赖**）。
+
+        高层召回通路通常没有「按 ID 取回块」的能力，故默认返回 0；
+        具备该能力的实现（如基于本地索引的通路）应覆写此方法。
+        """
+        return 0
 
 
 class FusionStrategy(ABC):
@@ -285,6 +333,53 @@ class Reranker(ABC):
     def rerank(self, query: str, candidates: Sequence[FusedHit],
                top_n: int) -> list[ScoredChunk]:
         """对候选重打分并返回前 ``top_n`` 条（``rank`` 从 0 递增）。"""
+
+    def normalize_scores(self, raw_scores: Sequence[float]) -> list[float]:
+        """把精排原始分统一映射到 ``[0, 1]``。
+
+        这是**接口级契约**：``ScoredChunk.score`` 存归一化分（供
+        ``RetrievalConfig.min_best_score`` 比较），``ScoredChunk.raw_score``
+        存原始分（供诊断）。默认实现为 clamp；交叉编码器应覆写为
+        sigmoid，基于名次的消融实现应覆写为名次映射。
+        """
+        return [clamp(float(value), 0.0, 1.0) for value in raw_scores]
+
+
+class QueryTransformer(ABC):
+    """查询变换层：把一个查询扩展成多个变体。
+
+    约定：返回值**非空**，首个元素是主查询（精排与 prompt 始终用主查询，
+    以控制交叉编码器成本）；失败由编排层按
+    ``FallbackConfig.on_transform_error`` 降级为 ``[原查询]``。
+    """
+
+    @property
+    def name(self) -> str:
+        return type(self).__name__
+
+    @abstractmethod
+    def transform(self, query: str) -> list[str]:
+        """返回至少一个查询变体。"""
+
+
+@runtime_checkable
+class QueryRewriter(Protocol):
+    """查询改写器协议（LLM 能力仅按 Protocol 注入，不绑定厂商）。"""
+
+    def rewrite(self, query: str) -> str:
+        """把原查询改写为一个新查询。"""
+
+
+@runtime_checkable
+class AnswerJudge(Protocol):
+    """答案级评测裁判协议；框架提供零依赖的规则型兜底实现。"""
+
+    def judge_faithfulness(self, question: str, answer: str,
+                           context: str) -> float:
+        """答案是否被给定上下文支撑（``[0,1]``）。"""
+
+    def judge_relevancy(self, question: str, answer: str) -> float:
+        """答案与问题的相关程度（``[0,1]``）。"""
 
 
 class ParentStore(Stateful, ABC):

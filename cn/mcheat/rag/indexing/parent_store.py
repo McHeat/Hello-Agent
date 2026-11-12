@@ -9,11 +9,15 @@
 * :class:`InMemoryParentStore` —— 零依赖，随 ``RAGSystem.save()`` 整体导出；
 * :class:`SqliteParentStore` —— 标准库 ``sqlite3``，父块量大时独立落盘，
   在线服务可直接 ``open()`` 读取，不必把全量父块加载进内存。
+
+两者都用 ``RLock`` 保护共享状态；SQLite 连接设 ``check_same_thread=False``，
+供并行召回与服务化并发读写。
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -46,41 +50,51 @@ class InMemoryParentStore(ParentStore):
 
     def __init__(self) -> None:
         self._data: dict[str, ParentChunk] = {}
+        self._lock = threading.RLock()
 
     def put(self, parents: Sequence[ParentChunk]) -> int:
-        for parent in parents:
-            self._data[parent.id] = parent
-        return len(parents)
+        with self._lock:
+            for parent in parents:
+                self._data[parent.id] = parent
+            return len(parents)
 
     def get(self, parent_id: str) -> ParentChunk | None:
-        return self._data.get(parent_id)
+        with self._lock:
+            return self._data.get(parent_id)
 
     def get_many(self, ids: Sequence[str]) -> dict[str, ParentChunk]:
-        return {pid: self._data[pid] for pid in ids if pid in self._data}
+        with self._lock:
+            return {pid: self._data[pid] for pid in ids if pid in self._data}
 
     def delete(self, ids: Sequence[str]) -> int:
-        removed = 0
-        for pid in ids:
-            if self._data.pop(pid, None) is not None:
-                removed += 1
-        return removed
+        with self._lock:
+            removed = 0
+            for pid in ids:
+                if self._data.pop(pid, None) is not None:
+                    removed += 1
+            return removed
 
     def ids(self) -> set[str]:
-        return set(self._data)
+        with self._lock:
+            return set(self._data)
 
     def count(self) -> int:
-        return len(self._data)
+        with self._lock:
+            return len(self._data)
 
     def export_state(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "parents": [_parent_to_dict(p) for p in self._data.values()],
-        }
+        with self._lock:
+            return {
+                "version": 1,
+                "parents": [_parent_to_dict(p) for p in self._data.values()],
+            }
 
     def import_state(self, state: dict[str, Any]) -> None:
-        self._data = {
-            item["id"]: _parent_from_dict(item) for item in state.get("parents", [])
-        }
+        with self._lock:
+            self._data = {
+                item["id"]: _parent_from_dict(item)
+                for item in state.get("parents", [])
+            }
 
     def save(self, path: str | Path) -> None:
         """单独落盘（不依赖 RAGSystem.save），便于在线服务直接读取。"""
@@ -107,9 +121,10 @@ class SqliteParentStore(ParentStore):
 
     def __init__(self, path: str | Path = "parents.sqlite3") -> None:
         self.path = str(Path(path))
+        self._lock = threading.RLock()
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
         try:
+            self._conn = sqlite3.connect(self.path, check_same_thread=False)
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS parents ("
                 "  id TEXT PRIMARY KEY,"
@@ -121,17 +136,18 @@ class SqliteParentStore(ParentStore):
             raise PersistenceError(f"初始化父块数据库 {self.path} 失败：{exc}") from exc
 
     def put(self, parents: Sequence[ParentChunk]) -> int:
-        try:
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO parents (id, payload) VALUES (?, ?)",
-                [
-                    (p.id, json.dumps(_parent_to_dict(p), ensure_ascii=False))
-                    for p in parents
-                ],
-            )
-            self._conn.commit()
-        except sqlite3.Error as exc:
-            raise PersistenceError(f"写入父块数据库失败：{exc}") from exc
+        with self._lock:
+            try:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO parents (id, payload) VALUES (?, ?)",
+                    [
+                        (p.id, json.dumps(_parent_to_dict(p), ensure_ascii=False))
+                        for p in parents
+                    ],
+                )
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                raise PersistenceError(f"写入父块数据库失败：{exc}") from exc
         return len(parents)
 
     def get(self, parent_id: str) -> ParentChunk | None:
@@ -142,13 +158,14 @@ class SqliteParentStore(ParentStore):
         if not unique:
             return {}
         placeholders = ",".join("?" for _ in unique)
-        try:
-            rows = self._conn.execute(
-                f"SELECT id, payload FROM parents WHERE id IN ({placeholders})",
-                unique,
-            ).fetchall()
-        except sqlite3.Error as exc:
-            raise PersistenceError(f"读取父块数据库失败：{exc}") from exc
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    f"SELECT id, payload FROM parents WHERE id IN ({placeholders})",
+                    unique,
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise PersistenceError(f"读取父块数据库失败：{exc}") from exc
         return {row[0]: _parent_from_dict(json.loads(row[1])) for row in rows}
 
     def delete(self, ids: Sequence[str]) -> int:
@@ -156,27 +173,32 @@ class SqliteParentStore(ParentStore):
         if not unique:
             return 0
         placeholders = ",".join("?" for _ in unique)
-        try:
-            cursor = self._conn.execute(
-                f"DELETE FROM parents WHERE id IN ({placeholders})", unique
-            )
-            self._conn.commit()
-        except sqlite3.Error as exc:
-            raise PersistenceError(f"删除父块失败：{exc}") from exc
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    f"DELETE FROM parents WHERE id IN ({placeholders})", unique
+                )
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                raise PersistenceError(f"删除父块失败：{exc}") from exc
         return cursor.rowcount
 
     def ids(self) -> set[str]:
-        try:
-            rows = self._conn.execute("SELECT id FROM parents").fetchall()
-        except sqlite3.Error as exc:
-            raise PersistenceError(f"枚举父块 ID 失败：{exc}") from exc
+        with self._lock:
+            try:
+                rows = self._conn.execute("SELECT id FROM parents").fetchall()
+            except sqlite3.Error as exc:
+                raise PersistenceError(f"枚举父块 ID 失败：{exc}") from exc
         return {row[0] for row in rows}
 
     def count(self) -> int:
-        try:
-            return int(self._conn.execute("SELECT COUNT(*) FROM parents").fetchone()[0])
-        except sqlite3.Error as exc:
-            raise PersistenceError(f"统计父块数量失败：{exc}") from exc
+        with self._lock:
+            try:
+                return int(self._conn.execute(
+                    "SELECT COUNT(*) FROM parents"
+                ).fetchone()[0])
+            except sqlite3.Error as exc:
+                raise PersistenceError(f"统计父块数量失败：{exc}") from exc
 
     def export_state(self) -> dict[str, Any]:
         """外部持久化：只记录路径，数据由 SQLite 自己管理。"""
@@ -193,7 +215,8 @@ class SqliteParentStore(ParentStore):
 
     def close(self) -> None:
         """关闭连接（在线服务退出时调用）。"""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

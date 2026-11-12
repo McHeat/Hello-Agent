@@ -39,26 +39,37 @@ from .core.bootstrap import bootstrap
 bootstrap()
 
 from .api import RAGSystem  # noqa: E402  (必须在 bootstrap 之后)
-from .config import RAGConfig  # noqa: E402
+from .config import RAGConfig, load_profile  # noqa: E402
+from .core.interfaces import AnswerJudge, QueryRewriter, QueryTransformer  # noqa: E402
 from .evaluation import (  # noqa: E402
+    AnswerEvalReport,
+    AnswerEvalRunner,
     EvalReport,
     EvalRunner,
     GoldenCase,
     GoldenSet,
+    LexicalJudge,
     RegressionVerdict,
+    answer_relevancy,
     context_precision,
     context_recall,
+    faithfulness,
 )
+from .evaluation.metrics import GATED_METRICS  # noqa: E402
 from .exceptions import (  # noqa: E402
+    CacheError,
     ConfigError,
     DependencyMissingError,
     DimensionMismatchError,
+    IndexFingerprintMismatchError,
     IndexingError,
     LoaderError,
     PersistenceError,
+    QueryTransformError,
     RAGError,
     RetrievalError,
 )
+from .indexing import SourceManifest, SourceRecord  # noqa: E402
 from .models import (  # noqa: E402
     BuiltContext,
     ChildChunk,
@@ -69,20 +80,37 @@ from .models import (  # noqa: E402
     RetrievalResult,
     ScoredChunk,
 )
+from .retrieval.cache import InMemoryCache, NullCache  # noqa: E402
+from .retrieval.query_transform import (  # noqa: E402
+    IdentityQueryTransformer,
+    LLMQueryTransformer,
+    QueryTransformPipeline,
+    RuleBasedQueryTransformer,
+)
+from .vectorstores import SqliteVectorStore  # noqa: E402
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 __all__ = [
     # 门面 / 配置
-    "RAGSystem", "RAGConfig", "bootstrap", "__version__",
+    "RAGSystem", "RAGConfig", "load_profile", "bootstrap", "__version__",
     # 领域模型
     "Document", "ParentChunk", "ChildChunk", "ScoredChunk", "BuiltContext",
     "IndexStats", "RetrievalResult", "RetrievalAction",
+    # 接口与可选组件
+    "QueryTransformer", "QueryRewriter", "AnswerJudge",
+    "IdentityQueryTransformer", "RuleBasedQueryTransformer",
+    "LLMQueryTransformer", "QueryTransformPipeline",
+    "InMemoryCache", "NullCache", "SqliteVectorStore",
+    "SourceManifest", "SourceRecord",
     # 评测
     "GoldenSet", "GoldenCase", "EvalRunner", "EvalReport",
     "RegressionVerdict", "context_recall", "context_precision",
+    "GATED_METRICS", "AnswerEvalRunner", "AnswerEvalReport",
+    "LexicalJudge", "faithfulness", "answer_relevancy",
     # 异常
     "RAGError", "ConfigError", "LoaderError", "IndexingError",
     "RetrievalError", "DimensionMismatchError", "DependencyMissingError",
-    "PersistenceError",
+    "PersistenceError", "QueryTransformError", "CacheError",
+    "IndexFingerprintMismatchError",
 ]

@@ -2,8 +2,10 @@
 
 * :class:`InMemoryVectorStore` —— 精确暴力余弦检索，随 ``RAGSystem.save()``
   整体序列化；适合中小语料、演示与单元测试。
-* :class:`FileBackedVectorStore` —— 在上者基础上每次写操作后原子落盘到
-  JSON，适合「离线进程建索引、在线进程直接读文件」的部署方式。
+* :class:`FileBackedVectorStore` —— 在上者基础上落盘到 JSON。
+  **``auto_save`` 默认 ``False``**（D7）：构建期关闭自动写，由
+  ``OfflineIndexer.build()`` 结束统一 ``flush()`` 一次，把近似 O(N²) 的
+  全量重写降为 O(N)。直接使用该类时须显式调用 :meth:`flush`。
 
 接 FAISS / Milvus / pgvector 时，实现 ``core.interfaces.VectorStore`` 即可，
 上层 ``EmbeddingDenseRetriever`` 与在线检索链路完全不用改。
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -32,6 +35,9 @@ class InMemoryVectorStore(VectorStore):
         metric: ``"cosine"``（写入时归一化）或 ``"dot"``（原样存储）。
         dimension: 可选；不传则由第一批写入的向量推断，并据此校验后续写入。
             **换 embedding 模型会触发** ``DimensionMismatchError``，需重建索引。
+
+    线程安全：所有读写都在 ``RLock`` 内完成，供 ``parallel_recall`` 与
+    服务化场景并发使用。
     """
 
     def __init__(self, metric: str = "cosine",
@@ -44,6 +50,7 @@ class InMemoryVectorStore(VectorStore):
         self._dimension = dimension
         self._vectors: dict[str, Vector] = {}
         self._chunks: dict[str, ChildChunk] = {}
+        self._lock = threading.RLock()
 
     # -- 写入 ---------------------------------------------------------------
 
@@ -53,24 +60,26 @@ class InMemoryVectorStore(VectorStore):
             raise VectorStoreError(
                 f"子块数({len(chunks)})与向量数({len(vectors)})不一致"
             )
-        for chunk, raw_vector in zip(chunks, vectors):
-            vector = tuple(float(x) for x in raw_vector)
-            if not vector:
-                raise VectorStoreError(f"子块 {chunk.id} 的向量为空")
-            if self._dimension is None:
-                self._dimension = len(vector)
-            elif len(vector) != self._dimension:
-                raise DimensionMismatchError(
-                    f"子块 {chunk.id} 向量维度 {len(vector)} 与库维度 "
-                    f"{self._dimension} 不符 —— 通常意味着换了 embedding 模型，"
-                    f"请清空并重建索引（或把 vector_store.dimension 与模型对齐）。"
+        with self._lock:
+            for chunk, raw_vector in zip(chunks, vectors):
+                vector = tuple(float(x) for x in raw_vector)
+                if not vector:
+                    raise VectorStoreError(f"子块 {chunk.id} 的向量为空")
+                if self._dimension is None:
+                    self._dimension = len(vector)
+                elif len(vector) != self._dimension:
+                    raise DimensionMismatchError(
+                        f"子块 {chunk.id} 向量维度 {len(vector)} 与库维度 "
+                        f"{self._dimension} 不符 —— 通常意味着换了 embedding 模型，"
+                        f"请清空并重建索引（或把 vector_store.dimension 与模型对齐）。"
+                    )
+                self._vectors[chunk.id] = (
+                    l2_normalize(vector) if self.metric == "cosine" else vector
                 )
-            self._vectors[chunk.id] = (
-                l2_normalize(vector) if self.metric == "cosine" else vector
-            )
-            self._chunks[chunk.id] = chunk
-        logger.debug("向量库 upsert %d 条，当前 %d 条", len(chunks), self.count())
-        return len(chunks)
+                self._chunks[chunk.id] = chunk
+            logger.debug("向量库 upsert %d 条，当前 %d 条",
+                         len(chunks), self.count())
+            return len(chunks)
 
     # -- 查询 ---------------------------------------------------------------
 
@@ -79,46 +88,67 @@ class InMemoryVectorStore(VectorStore):
         if k <= 0:
             return []
         query = tuple(float(x) for x in query_vector)
-        if self._dimension is not None and len(query) != self._dimension:
-            raise DimensionMismatchError(
-                f"查询向量维度 {len(query)} 与库维度 {self._dimension} 不符"
-            )
-        if self.metric == "cosine":
-            query = l2_normalize(query)
+        with self._lock:
+            if self._dimension is not None and len(query) != self._dimension:
+                raise DimensionMismatchError(
+                    f"查询向量维度 {len(query)} 与库维度 {self._dimension} 不符"
+                )
+            if self.metric == "cosine":
+                query = l2_normalize(query)
 
-        scored: list[tuple[float, str]] = []
-        for chunk_id, vector in self._vectors.items():
-            chunk = self._chunks[chunk_id]
-            if metadata_filter and not self._matches(chunk, metadata_filter):
-                continue
-            scored.append((cosine_similarity(query, vector), chunk_id))
+            scored: list[tuple[float, str]] = []
+            for chunk_id, vector in self._vectors.items():
+                chunk = self._chunks[chunk_id]
+                if metadata_filter and not self._matches(chunk, metadata_filter):
+                    continue
+                scored.append((cosine_similarity(query, vector), chunk_id))
 
-        # 分数降序；分数相同按 ID 排序，保证结果可复现（评测/回归不抖动）
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        return [
-            Hit(chunk=self._chunks[chunk_id], score=float(score), source="dense")
-            for score, chunk_id in scored[:k]
-        ]
+            # 分数降序；分数相同按 ID 排序，保证结果可复现（评测/回归不抖动）
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            return [
+                Hit(chunk=self._chunks[chunk_id], score=float(score),
+                    source="dense")
+                for score, chunk_id in scored[:k]
+            ]
 
     @staticmethod
     def _matches(chunk: ChildChunk, where: dict[str, Any]) -> bool:
         """元数据精确匹配；所有条件都满足才保留。"""
         return all(chunk.metadata.get(key) == value for key, value in where.items())
 
+    def get_many(self, ids: Sequence[str]) -> dict[str, ChildChunk]:
+        """批量取回子块；缺失的 ID 不出现在返回 dict 中。"""
+        with self._lock:
+            return {chunk_id: self._chunks[chunk_id]
+                    for chunk_id in ids if chunk_id in self._chunks}
+
     def delete(self, ids: Sequence[str]) -> int:
-        removed = 0
-        for chunk_id in ids:
-            if chunk_id in self._vectors:
-                self._vectors.pop(chunk_id, None)
-                self._chunks.pop(chunk_id, None)
-                removed += 1
-        return removed
+        with self._lock:
+            removed = 0
+            for chunk_id in ids:
+                if chunk_id in self._vectors:
+                    self._vectors.pop(chunk_id, None)
+                    self._chunks.pop(chunk_id, None)
+                    removed += 1
+            return removed
+
+    def delete_by_source(self, source: str) -> int:
+        """按来源删除（默认 ``delete_by_source`` 钩子的实质实现）。"""
+        with self._lock:
+            matched = [
+                chunk_id for chunk_id, chunk in self._chunks.items()
+                if source in {chunk.metadata.get("source"),
+                              chunk.metadata.get("filename")}
+            ]
+            return self.delete(matched)
 
     def ids(self) -> set[str]:
-        return set(self._vectors)
+        with self._lock:
+            return set(self._vectors)
 
     def count(self) -> int:
-        return len(self._vectors)
+        with self._lock:
+            return len(self._vectors)
 
     @property
     def dimension(self) -> int | None:
@@ -127,44 +157,49 @@ class InMemoryVectorStore(VectorStore):
     # -- 持久化 -------------------------------------------------------------
 
     def export_state(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "metric": self.metric,
-            "dimension": self._dimension,
-            "records": [
-                [chunk_id, list(self._vectors[chunk_id]),
-                 self._chunks[chunk_id].to_dict()]
-                for chunk_id in sorted(self._vectors)
-            ],
-        }
+        with self._lock:
+            return {
+                "version": 1,
+                "metric": self.metric,
+                "dimension": self._dimension,
+                "records": [
+                    [chunk_id, list(self._vectors[chunk_id]),
+                     self._chunks[chunk_id].to_dict()]
+                    for chunk_id in sorted(self._vectors)
+                ],
+            }
 
     def import_state(self, state: dict[str, Any]) -> None:
         if state.get("external"):
             # 由子类（FileBackedVectorStore）自行从磁盘恢复
             return
-        self.metric = state.get("metric", "cosine")
-        self._dimension = state.get("dimension")
-        self._vectors.clear()
-        self._chunks.clear()
-        for chunk_id, vector, payload in state.get("records", []):
-            self._vectors[chunk_id] = tuple(float(x) for x in vector)
-            self._chunks[chunk_id] = ChildChunk.from_dict(payload)
+        with self._lock:
+            self.metric = state.get("metric", "cosine")
+            self._dimension = state.get("dimension")
+            self._vectors.clear()
+            self._chunks.clear()
+            for chunk_id, vector, payload in state.get("records", []):
+                self._vectors[chunk_id] = tuple(float(x) for x in vector)
+                self._chunks[chunk_id] = ChildChunk.from_dict(payload)
 
 
 @VECTOR_STORE_REGISTRY.register("file")
 class FileBackedVectorStore(InMemoryVectorStore):
-    """每次写操作后原子落盘的向量库。
+    """显式 ``flush()`` 落盘的向量库。
 
     ``export_state`` 只返回文件路径（``external=True``），避免 ``RAGSystem.save``
     把同一份向量复制两遍；``import_state`` 会触发从磁盘重新加载。
 
     Args:
         path: JSON 索引文件路径。
-        auto_save: ``False`` 时需手动调用 :meth:`flush`（批量导入更快）。
+        auto_save: **默认 ``False``**（D7）。置 ``True`` 可恢复「每次写操作
+            自动落盘」的旧语义，但会有写放大；批量导入建议保持 ``False``
+            并在结束时 ``flush()`` 一次。
     """
 
     def __init__(self, path: str | Path, metric: str = "cosine",
-                 dimension: int | None = None, auto_save: bool = True) -> None:
+                 dimension: int | None = None,
+                 auto_save: bool = False) -> None:
         super().__init__(metric=metric, dimension=dimension)
         self.path = Path(path)
         self.auto_save = auto_save
@@ -186,7 +221,7 @@ class FileBackedVectorStore(InMemoryVectorStore):
         return count
 
     def flush(self) -> None:
-        """把当前状态原子写入磁盘。"""
+        """把当前状态原子写入磁盘（构建期只调用一次）。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_json(self.path, super().export_state())
 

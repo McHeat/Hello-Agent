@@ -1,7 +1,16 @@
 {
   "version": 1,
   "_comment": "RAG 框架默认配置。修改这里或传入用户 JSON 即可替换任意组件；核心链路零第三方依赖。",
+  "_comment_threshold": "retrieval.min_best_score 为暂行值：以 0.35 为起点经 --sweep-threshold 扫描后回填；Golden Set 扩至 30~50 条后须复标并更新 --save-baseline 基线。",
   "components": {
+    "query_transformer": {
+      "name": "identity",
+      "params": {}
+    },
+    "cache": {
+      "name": "null",
+      "params": {}
+    },
     "embedder": {
       "name": "hashing",
       "params": { "dimension": 256 }
@@ -14,7 +23,8 @@
       "name": "embedding",
       "params": {
         "embedder": "@embedder",
-        "vector_store": "@vector_store"
+        "vector_store": "@vector_store",
+        "cache": "@cache"
       }
     },
     "sparse_retriever": {
@@ -84,11 +94,15 @@
     "dense_k": 50,
     "sparse_k": 50,
     "min_recall_hits": 3,
-    "min_best_score": 0.0,
+    "min_best_score": 0.30,
     "enable_dense": true,
     "enable_sparse": true,
     "batch_size": 32,
-    "prune_stale": true
+    "prune_stale": true,
+    "parallel_recall": false,
+    "recall_timeout_s": 5.0,
+    "max_query_variants": 3,
+    "max_recall_calls": 6
   },
   "fallback": {
     "enabled": true,
@@ -98,7 +112,21 @@
     "handoff_enabled": true,
     "no_answer_text": "没有找到相关信息，无法基于现有知识库回答该问题。",
     "handoff_text": "检索到的资料不足以可靠回答，已转人工处理。",
-    "strategies": ["widen_top_k", "human_handoff", "honest_no_answer"]
+    "strategies": ["widen_top_k", "human_handoff", "honest_no_answer"],
+    "on_transform_error": "use_original"
+  },
+  "query_transform": {
+    "name": "identity",
+    "params": {},
+    "on_error": "use_original"
+  },
+  "cache": {
+    "enabled": false,
+    "query_lru_size": 512,
+    "result_ttl_s": 300
+  },
+  "indexing": {
+    "mode": "auto"
   },
   "prompt": {
     "system_instruction": "你是知识库问答助手。请只依据下面提供的资料回答问题，并在句末用 [编号] 标注引用。资料中没有的信息不要编造；若资料不足，请直接说明没有找到相关信息。",

@@ -81,7 +81,18 @@ class TestGoldenSet(unittest.TestCase):
         golden = GoldenSet.from_json(EXAMPLE_GOLDEN)
         self.assertEqual(golden.name, "rag-notes-v1")
         self.assertGreaterEqual(len(golden), 8)
-        self.assertTrue(all(case.relevant_ids for case in golden))
+        # 负样本允许空 relevant_ids；正样本仍必须有非空标注
+        self.assertTrue(all(case.relevant_ids for case in golden if case.answerable))
+        self.assertTrue(any(not case.answerable for case in golden))
+
+    def test_negative_case_schema_and_should_refuse(self):
+        case = GoldenCase.from_dict({
+            "query": "无关问题", "relevant_ids": [],
+            "answerable": False, "expected_answer": "",
+        })
+        self.assertTrue(case.should_refuse)
+        self.assertEqual(case.relevant_ids, frozenset())
+        self.assertEqual(GoldenCase.from_dict(case.to_dict()), case)
 
     def test_invalid_cases_are_rejected(self):
         for payload in (

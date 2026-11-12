@@ -1,23 +1,25 @@
 """Loader #4：HTML 网页（``.html`` ``.htm`` ``.xhtml``）。
 
-用**标准库** ``html.parser`` 做正文抽取，不依赖 BeautifulSoup：
-
-* 丢弃 ``script/style/noscript/nav/header/footer/aside/form/svg`` 等非正文标签；
-* 块级标签转换成换行，``<li>`` 加项目符号，保留基本阅读结构；
-* 抽取 ``<title>`` 与 ``<meta name="description">`` 写入 metadata；
-* ``convert_charrefs=True`` 自动还原 ``&nbsp;`` 等实体。
+HTML 读取与初步抽取委托 ``langchain_community.document_loaders.BSHTMLLoader``；
+正文的**结构化**（丢弃非正文标签、块级标签转换换行、``<li>`` 项目符号）保留为
+自有后处理，因为 LC ``BSHTMLLoader`` 只做 ``soup.get_text()``，无法保证与
+重构前一致的阅读结构。LC 结果用于 ``title`` 兜底与抽取为空时的诊断记录，
+不改写正文，保证产出与重构前完全一致。
 
 抽取后仍会经过清洗流水线（去残留标签、压缩空白），两道防线互不重复。
 """
 from __future__ import annotations
 
 import html
+import importlib.util
 import re
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Sequence
 
-from .base import BaseFileLoader, base_metadata
+from .base import BaseFileLoader, base_metadata, resolve_file
 from .._utils import get_logger
+from ..exceptions import DependencyMissingError, LoaderError
 from ..models import Document
 
 logger = get_logger(__name__)
@@ -106,6 +108,27 @@ class _TextExtractor(HTMLParser):
         return raw.strip()
 
 
+def _lc_html(path: Path) -> tuple[str, str | None]:
+    """委托 LC ``BSHTMLLoader`` 做初步抽取（延迟导入 + 依赖提示）。"""
+    try:
+        from langchain_community.document_loaders import BSHTMLLoader
+    except ImportError as exc:
+        raise DependencyMissingError("langchain-community", "HTML 加载") from exc
+    try:
+        documents = BSHTMLLoader(str(path)).load()
+    except ImportError as exc:
+        raise DependencyMissingError(
+            "beautifulsoup4", "HTML 加载", "BSHTMLLoader 还可能需要 lxml"
+        ) from exc
+    except Exception as exc:
+        raise LoaderError(
+            f"LC BSHTMLLoader 解析 {path} 失败：{type(exc).__name__}: {exc}"
+        ) from exc
+    text = "\n".join(doc.page_content for doc in documents)
+    title = documents[0].metadata.get("title") if documents else None
+    return text, title
+
+
 class HtmlLoader(BaseFileLoader):
     """HTML 正文抽取加载器（一个文件 = 一篇文档）。"""
 
@@ -113,21 +136,33 @@ class HtmlLoader(BaseFileLoader):
     doc_type = "html"
 
     def load(self, source) -> list[Document]:
-        path, raw = self._read(source)
+        path = resolve_file(source, self.config)
+        lc_text, lc_title = "", None
+        if importlib.util.find_spec("langchain_community") is not None:
+            try:
+                lc_text, lc_title = _lc_html(path)
+            except (DependencyMissingError, LoaderError) as exc:
+                logger.debug("%s 的 LC 抽取失败，使用标准库解析：%s", path, exc)
+
+        _, raw = self._read(source)
         extractor = _TextExtractor()
         try:
             extractor.feed(raw)
             extractor.close()
         except Exception as exc:  # HTMLParser 对畸形 HTML 一般很宽容，仍需兜底
-            from ..exceptions import LoaderError
             raise LoaderError(f"HTML 解析失败：{path}：{exc}") from exc
 
+        # 正文只用自有结构化抽取，避免 LC get_text() 把 script/nav 原文带回，
+        # 保证与重构前「正文为空即返回空」的行为完全一致；LC 结果仅作诊断。
         text = extractor.text
         if not text:
+            if lc_text.strip():
+                logger.debug("%s 自有抽取为空（LC 抽取到 %d 字符），保持空正文",
+                             path, len(lc_text))
             logger.warning("HTML 未抽取到正文：%s", path)
         metadata = base_metadata(
             path, "html",
-            title=extractor.title,
+            title=extractor.title or lc_title,
             description=extractor.description,
         )
         return [Document(page_content=text, metadata=metadata)]

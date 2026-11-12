@@ -9,7 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cn.mcheat.rag.config import RAGConfig, _deep_merge
-from cn.mcheat.rag.core.registry import resolve_references
+from cn.mcheat.rag.core.registry import (
+    BUILD_ORDER,
+    OPTIONAL_COMPONENTS,
+    REQUIRED_COMPONENTS,
+    resolve_references,
+)
 from cn.mcheat.rag.exceptions import ConfigError
 
 
@@ -101,6 +106,30 @@ class TestConfig(unittest.TestCase):
     def test_deep_merge_replaces_lists_not_appends(self):
         merged = _deep_merge({"a": [1, 2], "b": {"c": 1}}, {"a": [3], "b": {"d": 2}})
         self.assertEqual(merged, {"a": [3], "b": {"c": 1, "d": 2}})
+
+    def test_optional_components_are_injected_and_required_ones_unchanged(self):
+        cfg = RAGConfig.load(use_env=False)
+        self.assertEqual(set(OPTIONAL_COMPONENTS), {"query_transformer", "cache"})
+        self.assertEqual(len(REQUIRED_COMPONENTS), 9)
+        self.assertTrue(set(OPTIONAL_COMPONENTS).isdisjoint(REQUIRED_COMPONENTS))
+        self.assertEqual(BUILD_ORDER[:2], ("query_transformer", "cache"))
+        self.assertIn("query_transformer", cfg.components)
+        self.assertIn("cache", cfg.components)
+        self.assertEqual(cfg.component("query_transformer").name, "identity")
+        self.assertEqual(cfg.component("cache").name, "null")
+
+    def test_new_config_sections_and_gate_defaults(self):
+        cfg = RAGConfig.load(use_env=False)
+        self.assertGreater(cfg.retrieval.min_best_score, 0.0)
+        self.assertLessEqual(cfg.retrieval.min_best_score, 1.0)
+        self.assertFalse(cfg.retrieval.parallel_recall)  # D10：默认关闭
+        self.assertGreater(cfg.retrieval.max_query_variants, 0)
+        self.assertGreater(cfg.retrieval.max_recall_calls, 0)
+        self.assertGreater(cfg.retrieval.recall_timeout_s, 0.0)
+        self.assertEqual(cfg.indexing.mode, "auto")
+        self.assertFalse(cfg.cache.enabled)
+        self.assertEqual(cfg.query_transform.name, "identity")
+        self.assertEqual(cfg.fallback.on_transform_error, "use_original")
 
     def test_save_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

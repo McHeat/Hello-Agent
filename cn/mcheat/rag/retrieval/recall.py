@@ -18,6 +18,7 @@ from ..core.interfaces import Embedder, RecallRetriever, VectorStore
 from ..core.registry import DENSE_RETRIEVER_REGISTRY, SPARSE_RETRIEVER_REGISTRY
 from ..exceptions import ConfigError, DependencyMissingError
 from ..models import ChildChunk, Hit, Vector
+from .cache import NullCache
 
 logger = get_logger(__name__)
 
@@ -33,10 +34,11 @@ class EmbeddingDenseRetriever(RecallRetriever):
         embedder: 向量化器（索引侧与查询侧共用同一实例）。
         vector_store: 可插拔向量库。
         batch_size: 离线批量 embedding 的大小。
+        cache: 查询向量 LRU 缓存钩子；默认 ``NullCache``（关闭）。
     """
 
     def __init__(self, embedder: Embedder, vector_store: VectorStore,
-                 batch_size: int = 32) -> None:
+                 batch_size: int = 32, cache: Any | None = None) -> None:
         if not isinstance(embedder, Embedder):
             raise ConfigError("embedder 必须实现 core.interfaces.Embedder")
         if not isinstance(vector_store, VectorStore):
@@ -46,6 +48,7 @@ class EmbeddingDenseRetriever(RecallRetriever):
         self.embedder = embedder
         self.vector_store = vector_store
         self.batch_size = batch_size
+        self.cache = cache or NullCache()
 
     def index(self, chunks: Sequence[ChildChunk]) -> int:
         if not chunks:
@@ -57,7 +60,11 @@ class EmbeddingDenseRetriever(RecallRetriever):
 
     def search(self, query: str, k: int,
                metadata_filter: dict[str, Any] | None = None) -> list[Hit]:
-        vector = self.embedder.embed_query(query)
+        fingerprint = self.embedder.fingerprint()
+        vector = self.cache.get_query_vector(fingerprint, query)
+        if vector is None:
+            vector = self.embedder.embed_query(query)
+            self.cache.put_query_vector(fingerprint, query, vector)
         hits = self.vector_store.search(vector, k, metadata_filter)
         for hit in hits:
             hit.source = "dense"
@@ -65,6 +72,10 @@ class EmbeddingDenseRetriever(RecallRetriever):
 
     def delete(self, ids: Sequence[str]) -> int:
         return self.vector_store.delete(ids)
+
+    def delete_by_source(self, source: str) -> int:
+        """把按来源删除委托给底层向量库（默认钩子，非增量路径必需依赖）。"""
+        return self.vector_store.delete_by_source(source)
 
     def ids(self) -> set[str]:
         return self.vector_store.ids()
@@ -95,7 +106,7 @@ class LangChainDenseRetriever(RecallRetriever):
                  collection_name: str = "rag",
                  persist_directory: str | None = None,
                  embedding_provider: str = "huggingface",
-                 embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+                 embedding_model: str = "BAAI/bge-m3",
                  batch_size: int = 32,
                  **kwargs: Any) -> None:
         self.batch_size = batch_size
