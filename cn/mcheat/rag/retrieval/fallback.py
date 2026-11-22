@@ -38,8 +38,11 @@ def diagnose(context: FallbackContext) -> list[str]:
 
     * 粗候选数低于 ``min_recall_hits``（会按语料规模自动收敛，避免小库误判）；
     * 精排后没有任何候选；
-    * 最高精排分低于 ``min_best_score``；
+    * 最高**归一化精排分**低于 ``min_best_score``（``final[].score``，
+      值域 ``[0,1]``，由 ``Reranker.normalize_scores`` 保证）；
     * 上下文为空。
+
+    查询变换失败时编排层已降级为原查询，本函数看到的现场与单查询一致。
     """
     reasons: list[str] = []
     effective_min = min(context.min_recall_hits, max(context.corpus_size, 1))
@@ -123,24 +126,45 @@ class FallbackChain:
     """按配置顺序组合兜底策略，产出一次检索的 :class:`FallbackDecision`。"""
 
     def __init__(self, strategies: Sequence[FallbackStrategy],
-                 enabled: bool = True) -> None:
+                 enabled: bool = True,
+                 threshold_provisional: bool = False) -> None:
         self.strategies = list(strategies)
         self.enabled = enabled
+        self.threshold_provisional = threshold_provisional
 
     @classmethod
-    def from_config(cls, config: FallbackConfig) -> "FallbackChain":
-        """按 ``fallback.strategies`` 里的名字从注册表构造策略链。"""
+    def from_config(cls, config: FallbackConfig,
+                    threshold_provisional: bool = False) -> "FallbackChain":
+        """按 ``fallback.strategies`` 里的名字从注册表构造策略链。
+
+        生产档暂行阈值未复标时输出 WARNING，避免把不可迁移的默认栈阈值
+        误当成生产栈已生效的质量门禁。
+        """
         strategies = [
             FALLBACK_STRATEGY_REGISTRY.create(name)
             for name in config.strategies
         ]
-        return cls(strategies=strategies, enabled=config.enabled)
+        provisional = threshold_provisional or config.threshold_provisional
+        if provisional:
+            logger.warning(
+                "生产档 min_best_score 为暂行值且尚未按生产栈复标："
+                "该阈值沿用默认栈标定结果，分数分布不同、不可直接迁移；"
+                "请按方案 9.4 完成一次性人工标定后回填 production.json 并更新门禁基线。"
+            )
+        return cls(strategies=strategies, enabled=config.enabled,
+                   threshold_provisional=provisional)
 
     def evaluate(self, context: FallbackContext) -> FallbackDecision:
         """评估是否需要兜底，并返回首个生效策略的动作。"""
         if not self.enabled:
             return FallbackDecision(triggered=False)
 
+        if context.min_best_score <= 0.0:
+            logger.warning(
+                "质量门禁实际关闭：min_best_score=0.0，只要召回条数达标任何"
+                "低质结果都会进 prompt。请设置由 --sweep-threshold 标定的非零阈值；"
+                "消融实验如需旁路门禁，请显式设置 fallback.enabled=false。"
+            )
         triggers = diagnose(context)
         if not triggers:
             return FallbackDecision(triggered=False)

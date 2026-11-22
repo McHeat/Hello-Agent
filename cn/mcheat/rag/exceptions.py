@@ -91,6 +91,14 @@ class EmptyRecallError(RetrievalError):
     """
 
 
+class QueryTransformError(RetrievalError):
+    """查询变换失败且策略为 ``raise`` 时抛出，编排层默认降级为原查询。"""
+
+
+class CacheError(RAGError):
+    """缓存组件构造或使用失败。"""
+
+
 # --- 持久化 ------------------------------------------------------------------
 
 
@@ -105,6 +113,20 @@ class PersistenceNotSupportedError(PersistenceError):
         super().__init__(
             f"组件 {component!r} 未实现 {operation}()，无法随 RAGSystem 一起持久化。"
             f"请实现 Stateful 接口，或通过 RAGSystem(overrides=...) 注入自带持久化的组件。"
+        )
+
+
+class IndexFingerprintMismatchError(PersistenceError):
+    """索引产物与当前 embedding 模型指纹不一致（含同维度换模型）。
+
+    旧向量的语义空间与新模型不同，必须重建索引，不能静默混用。
+    """
+
+    def __init__(self, saved: str, current: str) -> None:
+        super().__init__(
+            f"索引产物的 embedding 指纹（{saved}）与当前模型（{current}）不一致；"
+            f"请清空索引产物并用当前配置重建索引（RAGSystem.index + save），"
+            f"随后重跑 Golden Set 基线。"
         )
 
 

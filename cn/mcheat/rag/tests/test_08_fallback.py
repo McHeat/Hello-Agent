@@ -125,6 +125,22 @@ class TestFallbackChain(unittest.TestCase):
         decision = chain.evaluate(_context(attempt=2))
         self.assertEqual(decision.final_action, RetrievalAction.NO_ANSWER)
 
+    def test_gate_closed_by_zero_threshold_emits_warning(self):
+        chain = FallbackChain.from_config(FallbackConfig())
+        with self.assertLogs("cn.mcheat.rag", level="WARNING") as logs:
+            decision = chain.evaluate(_context(
+                coarse_count=30, final_count=5, best_score=0.9,
+                rerank_scores=[0.9], context_text="足够长的资料内容",
+                min_best_score=0.0, corpus_size=1000,
+            ))
+        self.assertFalse(decision.triggered)
+        self.assertTrue(any("质量门禁" in line for line in logs.output))
+
+    def test_provisional_production_threshold_emits_warning(self):
+        with self.assertLogs("cn.mcheat.rag", level="WARNING") as logs:
+            FallbackChain.from_config(FallbackConfig(threshold_provisional=True))
+        self.assertTrue(any("暂行" in line for line in logs.output))
+
 
 class TestFallbackInPipeline(unittest.TestCase):
     def test_empty_index_retries_then_handsoff(self):

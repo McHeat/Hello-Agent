@@ -19,7 +19,7 @@ import hashlib
 import math
 from typing import Sequence
 
-from .._utils import get_logger, l2_normalize, tokenize
+from .._utils import get_logger, l2_normalize, stable_id, tokenize
 from ..core.interfaces import Embedder
 from ..core.registry import EMBEDDER_REGISTRY
 from ..exceptions import ConfigError
@@ -65,6 +65,11 @@ class HashingEmbedder(Embedder):
     def embed_query(self, text: str) -> Vector:
         # 哈希编码不区分 query/document 通道；真实模型可在此加 query 前缀
         return self._embed_one(text)
+
+    def fingerprint(self) -> str:
+        """类名 + 实现名 + 维度 + 前缀配置的稳定哈希。"""
+        return stable_id(type(self).__name__, "hashing", self._dimension,
+                         "none", "", "")
 
 
 __all__: Sequence[str] = ["HashingEmbedder"]

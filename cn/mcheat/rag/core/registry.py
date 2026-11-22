@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Generic, TypeVar
 
-from ..exceptions import ConfigError
+from ..exceptions import ConfigError, RAGError
 from .._utils import get_logger
 from .interfaces import (
     Cleaner,
@@ -28,6 +28,7 @@ from .interfaces import (
     FusionStrategy,
     ParentChildSplitter,
     ParentStore,
+    QueryTransformer,
     Reranker,
     RecallRetriever,
     VectorStore,
@@ -96,7 +97,8 @@ class Registry(Generic[T]):
             )
         try:
             instance = factory(**kwargs)
-        except ConfigError:
+        except RAGError:
+            # 缺可选依赖等框架自身异常要原样透传，保留安装提示与异常类型
             raise
         except Exception as exc:  # 把构造期异常包成统一的可诊断错误
             raise ConfigError(
@@ -148,7 +150,15 @@ FALLBACK_STRATEGY_REGISTRY: Registry[FallbackStrategy] = Registry(
     "fallback_strategy", FallbackStrategy
 )
 
+# P1 可选组件注册表：默认规格全为零依赖实现，关闭时行为与改造前一致
+QUERY_TRANSFORMER_REGISTRY: Registry[QueryTransformer] = Registry(
+    "query_transformer", QueryTransformer
+)
+CACHE_REGISTRY: Registry[Any] = Registry("cache")
+
 ALL_REGISTRIES: dict[str, Registry[Any]] = {
+    "query_transformer": QUERY_TRANSFORMER_REGISTRY,
+    "cache": CACHE_REGISTRY,
     "embedder": EMBEDDER_REGISTRY,
     "vector_store": VECTOR_STORE_REGISTRY,
     "dense_retriever": DENSE_RETRIEVER_REGISTRY,
@@ -160,9 +170,8 @@ ALL_REGISTRIES: dict[str, Registry[Any]] = {
     "context_builder": CONTEXT_BUILDER_REGISTRY,
 }
 
-# 组件构建顺序：被 ``@component`` 引用依赖的必须先构造。
-# 见 config.ComponentSpec.params 中的 "@embedder" / "@vector_store" 引用语法。
-BUILD_ORDER: tuple[str, ...] = (
+# 必需的 9 个组件保持原样：旧用户配置 / 旧基线 / 旧索引产物都能继续加载
+CORE_BUILD_ORDER: tuple[str, ...] = (
     "embedder",
     "vector_store",
     "splitter",
@@ -174,7 +183,19 @@ BUILD_ORDER: tuple[str, ...] = (
     "sparse_retriever",
 )
 
-REQUIRED_COMPONENTS: frozenset[str] = frozenset(BUILD_ORDER)
+# 组件构建顺序：可选组件前置（被其它组件以 "@cache" 引用），其余保持原顺序。
+# 见 config.ComponentSpec.params 中的 "@embedder" / "@vector_store" 引用语法。
+BUILD_ORDER: tuple[str, ...] = (
+    "query_transformer", "cache", *CORE_BUILD_ORDER
+)
+
+REQUIRED_COMPONENTS: frozenset[str] = frozenset(CORE_BUILD_ORDER)
+
+# 可选组件默认规格：RAGConfig.from_dict() 为缺失项注入，保护旧配置
+OPTIONAL_COMPONENTS: dict[str, dict[str, Any]] = {
+    "query_transformer": {"name": "identity", "params": {}},
+    "cache": {"name": "null", "params": {}},
+}
 
 
 def resolve_references(params: dict[str, Any], built: dict[str, Any]) -> dict[str, Any]:

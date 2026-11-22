@@ -10,7 +10,8 @@
     report = system.evaluate("golden.json")   # 量化：Recall / Precision 回归
 
 所有组件既可由 ``configs/defaults.json`` 按名字替换，也可用 ``overrides``
-直接注入实例，两套方式都经过接口契约校验。
+直接注入实例，两套方式都经过接口契约校验。新增的可选组件（查询变换 /
+缓存）默认零依赖实现，旧配置 / 旧基线 / 旧索引产物均可继续加载。
 """
 from __future__ import annotations
 
@@ -27,9 +28,15 @@ from .core.registry import (
     BUILD_ORDER,
     resolve_references,
 )
+from .evaluation.answer_metrics import AnswerEvalReport, AnswerEvalRunner
 from .evaluation.golden import GoldenSet
 from .evaluation.runner import EvalReport, EvalRunner, RegressionVerdict
-from .exceptions import ConfigError, PersistenceError
+from .exceptions import (
+    ConfigError,
+    IndexFingerprintMismatchError,
+    PersistenceError,
+)
+from .indexing.manifest import SourceManifest
 from .indexing.pipeline import IndexArtifact, OfflineIndexer
 from .loaders.base import build_default_loader_registry
 from .models import IndexStats, RetrievalResult
@@ -37,6 +44,7 @@ from .retrieval.context import SmallToBigExpander
 from .retrieval.fallback import FallbackChain
 from .retrieval.hybrid import HybridRetriever
 from .retrieval.pipeline import OnlineRetriever
+from .retrieval.query_transform import QueryTransformPipeline
 
 logger = get_logger(__name__)
 
@@ -92,6 +100,10 @@ class RAGSystem:
             # 离线 embedding 批大小由 retrieval 配置统一控制
             if key == "dense_retriever" and spec.name == "embedding":
                 params.setdefault("batch_size", self.config.retrieval.batch_size)
+            if key == "cache":
+                params.setdefault("enabled", self.config.cache.enabled)
+                params.setdefault("query_lru_size", self.config.cache.query_lru_size)
+                params.setdefault("result_ttl_s", self.config.cache.result_ttl_s)
             built[key] = registry.create(spec.name, **params)
             logger.debug("组件 %s = %s(%s)", key, spec.name,
                          type(built[key]).__name__)
@@ -109,6 +121,8 @@ class RAGSystem:
             fusion=c["fusion"],
             enable_dense=self.config.retrieval.enable_dense,
             enable_sparse=self.config.retrieval.enable_sparse,
+            parallel_recall=self.config.retrieval.parallel_recall,
+            recall_timeout_s=self.config.retrieval.recall_timeout_s,
         )
         expand_to_parent = bool(
             self.config.component("context_builder").params.get("expand_to_parent", True)
@@ -127,6 +141,11 @@ class RAGSystem:
             parent_store=c["parent_store"],
             config=self.config,
         )
+        transformer = QueryTransformPipeline(
+            [c["query_transformer"]],
+            max_variants=self.config.retrieval.max_query_variants,
+            on_error=self.config.fallback.on_transform_error,
+        )
         self.retriever = OnlineRetriever(
             hybrid=self.hybrid,
             reranker=c["reranker"],
@@ -134,7 +153,11 @@ class RAGSystem:
             context_builder=c["context_builder"],
             fallback_chain=self.fallback_chain,
             config=self.config,
+            query_transformer=transformer,
+            cache=c["cache"],
+            version_provider=lambda: self.indexer.index_version,
         )
+        c["cache"].set_index_version(self.indexer.index_version)
 
     def component(self, key: str) -> Any:
         """取已装配的组件实例（便于自定义扩展与调试）。"""
@@ -145,18 +168,25 @@ class RAGSystem:
 
     # -- 离线索引 -----------------------------------------------------------
 
-    def index(self, sources: Sequence[Source] | Source) -> IndexStats:
+    def index(self, sources: Sequence[Source] | Source,
+              mode: str | None = None) -> IndexStats:
         """构建索引。
 
         Args:
             sources: 单个路径或路径列表；目录会被递归展开，5 种格式自动分发。
+            mode: ``auto``（默认）/ ``full`` / ``incremental``；``auto`` 表示
+                无 manifest 时全量、有则增量。
 
         Returns:
             :class:`IndexStats`。
         """
         if isinstance(sources, (str, Path)):
             sources = [sources]
-        return self.indexer.build(list(sources))
+        stats = self.indexer.build(list(sources), mode=mode)
+        cache = self._components.get("cache")
+        if cache is not None:
+            cache.set_index_version(self.indexer.index_version)
+        return stats
 
     # -- 在线检索 -----------------------------------------------------------
 
@@ -175,19 +205,27 @@ class RAGSystem:
 
     # -- 评测 ---------------------------------------------------------------
 
-    def evaluate(self, golden_set: GoldenSet | str | Path) -> EvalReport:
+    def evaluate(self, golden_set: GoldenSet | str | Path,
+                 answers: Mapping[str, str] | None = None,
+                 judge: Any | None = None) -> "EvalReport | AnswerEvalReport":
         """在 Golden Set 上跑回归评测。
 
         Args:
             golden_set: :class:`GoldenSet` 或 JSON 文件路径。
+            answers: 可选，调用方生成的答案（``query -> answer``）；提供时
+                改跑答案级评测（Faithfulness / Answer Relevancy），框架**不
+                代跑 LLM**。
+            judge: 可选，满足 ``AnswerJudge`` Protocol 的裁判。
 
         Returns:
-            :class:`EvalReport`（Recall 在粗召回算、Precision 在精排后算）。
+            :class:`EvalReport`（检索指标）或 :class:`AnswerEvalReport`。
         """
         loaded = (
             GoldenSet.from_json(golden_set)
             if isinstance(golden_set, (str, Path)) else golden_set
         )
+        if answers is not None:
+            return AnswerEvalRunner(self, loaded, answers, judge).run()
         return EvalRunner(self, loaded).run()
 
     def evaluate_with_gate(self, golden_set: GoldenSet | str | Path,
@@ -209,7 +247,7 @@ class RAGSystem:
     # -- 持久化 -------------------------------------------------------------
 
     def save(self, directory: str | Path) -> Path:
-        """把配置 + 三份索引状态 + 统计整体落盘。
+        """把配置 + 三份索引状态 + 统计 + 指纹/版本/清单整体落盘。
 
         只持久化 **dense_retriever / sparse_retriever / parent_store**：
         ``vector_store`` 的状态已包含在 dense_retriever 的导出里，其余组件
@@ -234,6 +272,10 @@ class RAGSystem:
                 self.indexer.last_cleaning_report.as_dict()
                 if self.indexer.last_cleaning_report else {}
             ),
+            embedding_fingerprint=self.component("embedder").fingerprint(),
+            index_version=self.indexer.index_version,
+            manifest=(self.indexer.manifest.as_dict()
+                      if self.indexer.manifest is not None else {}),
         )
         path = artifact.save(directory)
         logger.info("索引产物已保存：%s", path)
@@ -249,11 +291,22 @@ class RAGSystem:
             config: 覆盖归档配置；**换 embedding 模型/切分参数时不要这么做**，
                 否则向量维度与父子 ID 都可能对不上。
             overrides: 组件实例覆盖，语义同构造函数。
+
+        Raises:
+            IndexFingerprintMismatchError: 归档指纹与当前 embedder 不一致
+                （含同维度换模型），必须重建索引。
         """
         artifact = IndexArtifact.load(directory)
         effective_config = config or RAGConfig.from_dict(artifact.config)
         effective_config.validate()
         system = cls(config=effective_config, overrides=overrides)
+
+        current_fingerprint = system.component("embedder").fingerprint()
+        if (artifact.embedding_fingerprint
+                and artifact.embedding_fingerprint != current_fingerprint):
+            raise IndexFingerprintMismatchError(
+                artifact.embedding_fingerprint, current_fingerprint
+            )
 
         states = artifact.components
         required = {"dense_retriever", "sparse_retriever", "parent_store"}
@@ -270,6 +323,13 @@ class RAGSystem:
                 system.indexer.last_stats = IndexStats(**artifact.index_stats)
             except TypeError as exc:
                 logger.warning("索引统计字段不兼容，已忽略：%s", exc)
+
+        system.indexer.index_version = artifact.index_version
+        if artifact.manifest:
+            system.indexer.manifest = SourceManifest.from_dict(artifact.manifest)
+        cache = system._components.get("cache")
+        if cache is not None:
+            cache.set_index_version(artifact.index_version)
         logger.info(
             "索引产物已加载：%s（dense=%d, sparse=%d, parent=%d）",
             directory,

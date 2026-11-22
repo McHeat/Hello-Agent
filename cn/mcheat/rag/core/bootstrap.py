@@ -20,14 +20,19 @@ _BOOTSTRAPPED = False
 
 # 相对当前包 ``cn.mcheat.rag.core`` 的模块列表
 _REGISTRATION_MODULES: tuple[str, ...] = (
-    "..loaders",                 # 5 种 Loader（由 build_default_loader_registry 组装）
+    "..loaders",                 # 9 种 Loader（由 build_default_loader_registry 组装）
     "..cleaning",                # Cleaner 注册
     "..indexing",                # 父子切分器 / ParentStore 注册
     "..embeddings",              # HashingEmbedder 注册
     "..embeddings.adapters",     # LangChainEmbedder 注册（延迟第三方 import）
-    "..vectorstores",            # InMemory / FileBacked VectorStore 注册
+    "..vectorstores",            # InMemory / FileBacked / SQLite VectorStore 注册
+    "..vectorstores.sqlite",     # SqliteVectorStore 注册
     "..retrieval",               # BM25 / 融合 / 精排 / 上下文 / 兜底 注册
+    "..retrieval.query_transform",  # 查询变换实现注册
+    "..retrieval.cache",         # 缓存实现注册
+    "..indexing.manifest",       # SourceManifest（无注册，仅保证可导入）
     "..evaluation",              # 评测模块（无注册，仅保证可导入）
+    "..evaluation.answer_metrics",  # 答案级评测模块
 )
 
 

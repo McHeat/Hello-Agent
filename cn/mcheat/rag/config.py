@@ -1,8 +1,9 @@
-"""配置管理：JSON 默认值 → 用户配置 → 环境变量 → 代码覆盖，逐级合并 + 校验。
+"""配置管理：JSON 默认值 → 配置档 → 用户配置 → 环境变量 → 代码覆盖，逐级合并 + 校验。
 
 配置优先级（后者覆盖前者）::
 
-    configs/defaults.json  <  用户 JSON  <  RAG_* 环境变量  <  overrides 字典
+    configs/defaults.json  <  RAG_PROFILE 配置档  <  用户 JSON
+        <  RAG_* 环境变量  <  overrides 字典
 
 所有可调参数集中在一处，代码里不出现散落的魔法数字。每次 ``RAGConfig``
 构建都会执行 :meth:`RAGConfig.validate`，把《rag编码注意事项》里的建议区间
@@ -19,12 +20,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ._utils import get_logger
-from .core.registry import REQUIRED_COMPONENTS
+from .core.registry import OPTIONAL_COMPONENTS, REQUIRED_COMPONENTS
 from .exceptions import ConfigError
 
 logger = get_logger(__name__)
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "defaults.json"
+CONFIG_DIR = Path(__file__).resolve().parent / "configs"
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "defaults.json"
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +107,9 @@ class RetrievalConfig:
 
     ``coarse_top_k`` 与 ``rerank_top_n`` 直接对应《注意事项》第 1 条：
     粗召回 30~50 条，**只把精排后的 3~5 条**放进 prompt。
+    ``min_best_score`` 比较的是 ``final[].score``（``[0,1]`` 归一化分），
+    当前值为 ``--sweep-threshold`` 扫描后的**暂行值**，Golden Set 扩至
+    30~50 条后须复标。
     """
 
     coarse_top_k: int = 50          # 融合后保留的粗候选上限（建议 30~50）
@@ -112,11 +117,15 @@ class RetrievalConfig:
     dense_k: int = 50               # 稠密通路单路召回条数
     sparse_k: int = 50              # BM25 通路单路召回条数
     min_recall_hits: int = 3        # 低于该数量视为「召回不足」，触发兜底
-    min_best_score: float = 0.0     # 最高精排分低于该值触发兜底
+    min_best_score: float = 0.30    # 暂行值：0.35 起扫，依据扫描结果回填
     enable_dense: bool = True       # 消融开关：关闭稠密通路
     enable_sparse: bool = True      # 消融开关：关闭稀疏通路
     batch_size: int = 32            # 离线 embedding 批大小
-    prune_stale: bool = True        # 重建索引时删除本次未出现的旧块
+    prune_stale: bool = True        # 重建索引时删除本次未出现的旧块（仅全量模式）
+    parallel_recall: bool = False   # D10：默认关闭；仅生产档 / 服务化显式开启
+    recall_timeout_s: float = 5.0   # 并行召回单路超时
+    max_query_variants: int = 3     # 查询变体数上限
+    max_recall_calls: int = 6       # 多查询 × 扩 Top-K 重试的调用预算
 
 
 @dataclass
@@ -133,6 +142,33 @@ class FallbackConfig:
     strategies: list[str] = field(default_factory=lambda: [
         "widen_top_k", "human_handoff", "honest_no_answer",
     ])
+    on_transform_error: str = "use_original"  # 查询变换失败时降级为原查询
+    threshold_provisional: bool = False       # 生产档暂行阈值未复标 → WARNING
+
+
+@dataclass
+class QueryTransformConfig:
+    """查询变换层配置（8.2 新增配置节）。"""
+
+    name: str = "identity"
+    params: dict[str, Any] = field(default_factory=dict)
+    on_error: str = "use_original"
+
+
+@dataclass
+class CacheConfig:
+    """两级缓存配置；默认全关，保证零依赖默认档行为不变。"""
+
+    enabled: bool = False
+    query_lru_size: int = 512
+    result_ttl_s: float = 300.0
+
+
+@dataclass
+class IndexingConfig:
+    """离线索引模式：``auto`` 无 manifest 时全量、有则增量。"""
+
+    mode: str = "auto"
 
 
 @dataclass
@@ -176,12 +212,19 @@ class RAGConfig:
     fallback: FallbackConfig = field(default_factory=FallbackConfig)
     prompt: PromptConfig = field(default_factory=PromptConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    query_transform: QueryTransformConfig = field(default_factory=QueryTransformConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
+    indexing: IndexingConfig = field(default_factory=IndexingConfig)
+    profile: str = "default"        # 由 RAG_PROFILE / 配置档标记填充
 
     # -- 构造 ---------------------------------------------------------------
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RAGConfig":
         """从「已合并完成」的配置字典构造，缺失字段保留 dataclass 默认值。
+
+        缺失的**可选组件**会自动注入默认规格，保护旧用户配置、旧基线
+        与旧索引产物（``REQUIRED_COMPONENTS`` 保持不变）。
 
         Raises:
             ConfigError: 出现未知配置键或类型明显不符。
@@ -197,6 +240,8 @@ class RAGConfig:
             str(key): ComponentSpec.from_dict(value)
             for key, value in raw_components.items()
         }
+        for key, spec in OPTIONAL_COMPONENTS.items():
+            components.setdefault(key, ComponentSpec.from_dict(spec))
         return cls(
             version=int(data.get("version", 1)),
             components=components,
@@ -206,6 +251,11 @@ class RAGConfig:
             fallback=_build(FallbackConfig, data.get("fallback", {})),
             prompt=_build(PromptConfig, data.get("prompt", {})),
             evaluation=_build(EvaluationConfig, data.get("evaluation", {})),
+            query_transform=_build(QueryTransformConfig,
+                                   data.get("query_transform", {})),
+            cache=_build(CacheConfig, data.get("cache", {})),
+            indexing=_build(IndexingConfig, data.get("indexing", {})),
+            profile=str(data.get("profile", "default")),
         )
 
     @classmethod
@@ -217,10 +267,14 @@ class RAGConfig:
     ) -> "RAGConfig":
         """按优先级加载配置并完成校验。
 
+        ``RAG_PROFILE`` 环境变量（或配置档里的 ``_profile`` 标记）会把
+        ``configs/<profile>.json`` 作为补丁档合并进来；生产档只声明差异，
+        切换实现的组件必须显式写全 params（见 ``_reconcile_component_params``）。
+
         Args:
             path: 用户 JSON 配置路径；``None`` 表示只用内置默认值。
             overrides: 代码级覆盖（字典，会深度合并）。
-            use_env: 是否读取 ``RAG_*`` 环境变量。
+            use_env: 是否读取 ``RAG_*`` 环境变量（含 ``RAG_PROFILE``）。
 
         Returns:
             已校验的 :class:`RAGConfig`。
@@ -235,6 +289,18 @@ class RAGConfig:
             if isinstance(value, dict)
         }
         patches: list[Mapping[str, Any]] = []
+
+        if use_env:
+            profile_name = os.getenv("RAG_PROFILE", "").strip()
+            if profile_name and profile_name != "default":
+                profile_path = CONFIG_DIR / f"{profile_name}.json"
+                if not profile_path.is_file():
+                    raise ConfigError(
+                        f"RAG_PROFILE={profile_name!r} 对应的配置档不存在：{profile_path}"
+                    )
+                profile_patch = _read_json(profile_path)
+                patches.append(profile_patch)
+                data = _deep_merge(data, profile_patch)
 
         if path is not None:
             user_path = Path(path)
@@ -254,6 +320,10 @@ class RAGConfig:
 
         _reconcile_component_params(data, default_names, patches)
         config = cls.from_dict(data)
+        for patch in patches:
+            marker = patch.get("_profile")
+            if marker:
+                config.profile = str(marker)
         config.validate()
         return config
 
@@ -298,6 +368,8 @@ class RAGConfig:
         _positive("retrieval.dense_k", r.dense_k)
         _positive("retrieval.sparse_k", r.sparse_k)
         _positive("retrieval.batch_size", r.batch_size)
+        _positive("retrieval.max_query_variants", r.max_query_variants)
+        _positive("retrieval.max_recall_calls", r.max_recall_calls)
         if r.rerank_top_n > r.coarse_top_k:
             raise ConfigError(
                 f"rerank_top_n({r.rerank_top_n}) 不能大于 coarse_top_k"
@@ -307,6 +379,8 @@ class RAGConfig:
             raise ConfigError("粗召回两条通路都被关闭，检索永远无结果；至少启用一条。")
         if not 0.0 <= r.min_best_score <= 1.0:
             raise ConfigError("retrieval.min_best_score 需落在 [0, 1]。")
+        if r.recall_timeout_s <= 0:
+            raise ConfigError("retrieval.recall_timeout_s 必须为正数。")
 
         # 父子切分不变量（注意事项第 2 条）
         sp = self.component("splitter").params
@@ -344,12 +418,55 @@ class RAGConfig:
         if self.evaluation.recall_stage not in {"coarse", "final"} or \
                 self.evaluation.precision_stage not in {"coarse", "final"}:
             raise ConfigError("评测阶段只能是 'coarse' 或 'final'。")
+        if f.on_transform_error not in {"use_original", "raise"}:
+            raise ConfigError(
+                "fallback.on_transform_error 只能是 'use_original' 或 'raise'。"
+            )
+        if self.query_transform.on_error not in {"use_original", "raise"}:
+            raise ConfigError("query_transform.on_error 只能是 'use_original' 或 'raise'。")
+        if self.indexing.mode not in {"auto", "full", "incremental"}:
+            raise ConfigError("indexing.mode 只能是 'auto' / 'full' / 'incremental'。")
+        if self.cache.query_lru_size <= 0 or self.cache.result_ttl_s <= 0:
+            raise ConfigError("cache.query_lru_size / result_ttl_s 必须为正数。")
 
         # 软告警：把文档里的经验值显式写进代码，调参时不会被无声忽略
         _warn_range("coarse_top_k", r.coarse_top_k, 30, 50,
                     "《注意事项》第 1 条：混合召回建议 Top-30~50")
         _warn_range("rerank_top_n", r.rerank_top_n, 3, 5,
                     "《注意事项》第 1 条：精排后建议只把 Top-3~5 放进 prompt")
+        if f.enabled and r.min_best_score == 0.0:
+            logger.warning(
+                "质量门禁实际关闭：retrieval.min_best_score=0.0 时任何低质结果都会进 prompt。"
+                "请设置非零阈值（run_evaluation --sweep-threshold 标定）；"
+                "消融实验如需旁路门禁，请显式设置 fallback.enabled=false 或临时置 0。"
+            )
+        if f.threshold_provisional:
+            logger.warning(
+                "生产档 min_best_score 为暂行值（沿用默认栈标定结果，阈值不可迁移）；"
+                "上线前须按 9.4 一次性人工流程用真实生产栈复标，并更新 --save-baseline 基线。"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 配置档加载
+# ---------------------------------------------------------------------------
+
+
+def load_profile(profile: str = "production",
+                 **kwargs: Any) -> RAGConfig:
+    """加载命名配置档（默认 ``production``），等价于指定 ``RAG_PROFILE``。
+
+    Args:
+        profile: ``configs/<profile>.json`` 的名字。
+        **kwargs: 透传给 :meth:`RAGConfig.load`（``overrides`` / ``use_env`` 等）。
+
+    Returns:
+        已校验的 :class:`RAGConfig`。
+    """
+    path = CONFIG_DIR / f"{profile}.json"
+    config = RAGConfig.load(path=path, **kwargs)
+    config.profile = profile
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +549,7 @@ def _reconcile_component_params(
     Args:
         data: 已合并、将被就地修正的配置字典。
         default_names: 内置默认配置里各组件的名字。
-        patches: 用户提供过的各级 patch（文件 / 代码 / 环境变量）。
+        patches: 用户提供过的各级 patch（配置档 / 文件 / 代码 / 环境变量）。
     """
     explicit: dict[str, dict[str, Any]] = {}
     for patch in patches:

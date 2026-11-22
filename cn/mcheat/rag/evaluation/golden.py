@@ -12,21 +12,26 @@
           "query": "父子切分解决什么问题？",
           "relevant_ids": ["rag_notes.md"],
           "notes": "标注的是来源文件名，与 evaluation.id_field 对应"
+        },
+        {
+          "query": "帕米尔高原雪豹栖息地海拔",
+          "relevant_ids": [],
+          "answerable": false,
+          "notes": "应拒答负样本：知识库里没有相关文档"
         }
       ]
     }
 
 ``relevant_ids`` 的语义由 ``evaluation.id_field`` 决定，默认是 ``source``
-对应的 ``filename``；也可改成 ``parent_id`` / ``doc_id`` / ``chunk_id`` 做更细
-粒度的标注。用 ``filename`` 最省人力，也最适合「检索该检到的文档有没有检到」
-这类回归。
+对应的 ``filename``。**负样本**（``answerable=false``）允许空 ``relevant_ids``，
+用于阈值标定与拒答指标；旧的正样本 JSON 无需任何改动即合法。
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from ..exceptions import EvaluationError, PersistenceError
 
@@ -37,13 +42,23 @@ class GoldenCase:
 
     Attributes:
         query: 用户问题。
-        relevant_ids: 被判定为「相关」的 ID 集合（至少 1 个）。
+        relevant_ids: 被判定为「相关」的 ID 集合；可回答样本必须非空，
+            负样本允许为空。
         notes: 标注备注，便于复核。
+        answerable: 知识库是否应当能回答；默认 ``True``（兼容旧 JSON）。
+        expected_answer: 参考回答（答案级评测用；默认空，框架不代跑 LLM）。
     """
 
     query: str
     relevant_ids: frozenset[str]
     notes: str = ""
+    answerable: bool = True
+    expected_answer: str = ""
+
+    @property
+    def should_refuse(self) -> bool:
+        """是否应当拒答（由 ``answerable`` 派生）。"""
+        return not self.answerable
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "GoldenCase":
@@ -52,23 +67,33 @@ class GoldenCase:
         query = data.get("query")
         if not isinstance(query, str) or not query.strip():
             raise EvaluationError(f"GoldenCase 缺少非空 query：{dict(data)!r}")
-        raw_ids = data.get("relevant_ids")
-        if not isinstance(raw_ids, (list, tuple, set)) or not raw_ids:
+        answerable = bool(data.get("answerable", True))
+        raw_ids = data.get("relevant_ids", [])
+        if not isinstance(raw_ids, (list, tuple, set, frozenset)):
             raise EvaluationError(
-                f"query={query!r} 的 relevant_ids 必须是非空列表；"
-                f"没有相关标注时 Context Recall 无法定义。"
+                f"query={query!r} 的 relevant_ids 必须是列表/集合；"
+                f"没有相关标注的可回答样本无法定义 Context Recall。"
             )
         ids = frozenset(str(item) for item in raw_ids)
-        if not ids:
-            raise EvaluationError(f"query={query!r} 的 relevant_ids 全为空值")
-        return cls(query=query.strip(), relevant_ids=ids,
-                   notes=str(data.get("notes", "")))
+        if answerable and not ids:
+            raise EvaluationError(
+                f"query={query!r} 是可回答样本，relevant_ids 不能为空；"
+                f"无相关文档请显式标注 answerable=false。"
+            )
+        return cls(
+            query=query.strip(), relevant_ids=ids,
+            notes=str(data.get("notes", "")),
+            answerable=answerable,
+            expected_answer=str(data.get("expected_answer", "")),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "query": self.query,
             "relevant_ids": sorted(self.relevant_ids),
             "notes": self.notes,
+            "answerable": self.answerable,
+            "expected_answer": self.expected_answer,
         }
 
 

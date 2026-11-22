@@ -23,3 +23,11 @@ beautifulsoup4>=4.12       # WebBaseLoader 解析 HTML 需要
 # ---- step10_mcp.py 示例依赖（可选，仅跑该示例需要）----
 mcp>=1.0                        # MCP 协议运行时（FastMCP 服务端）
 langchain-mcp-adapters>=0.0.9   # 把 MCP 工具桥接成 LangChain 工具
+
+# ---- RAG Loader 重构：LangChain 文档加载器所需解析库 ----
+jq>=1.6                 # langchain-community JSONLoader 的 jq schema 依赖
+docx2txt>=0.8           # Docx2txtLoader 解析 Word (.docx)
+openpyxl>=3.1           # Excel (.xlsx) 轻量解析
+python-pptx>=0.6        # PowerPoint (.pptx) 轻量解析
+pypdf>=5.0              # PyPDFLoader 解析 PDF
+requests>=2.31          # WebBaseLoader 抓取网页

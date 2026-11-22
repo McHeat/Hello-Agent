@@ -161,16 +161,21 @@ class EdgePlacementContextBuilder(ContextBuilder):
 
         # 输入按相关性排序（rank 升序），重排时也用这个顺序作为 rank 基准
         ranked = sorted(chunks, key=lambda item: (item.rank, item.chunk.id))
-        # 1) 预算裁剪：先丢最不相关的（在 edges 策略下正好是中间位置）
+        # 1) 预算裁剪：先丢最不相关的（在 edges 策略下正好是中间位置）。
+        #    预计算每块渲染长度，循环中增量扣减，避免在 while 内反复完整
+        #    渲染所有块（改造前是近似 O(n²) 的重复渲染）。
         selected = list(ranked)
+        lengths = [len(_block_text(item, 1)) + 2 for item in selected]
+        total_length = sum(lengths)
         truncated_ids: list[str] = []
-        while len(selected) > 1 and self._total_length(selected) > self.max_context_chars:
+        while len(selected) > 1 and total_length > self.max_context_chars:
             removed = selected.pop()
+            total_length -= lengths.pop()
             truncated_ids.append(removed.chunk.id)
 
         # 2) 单块过长时等比截断正文，保证总预算不被突破
         body_limit: int | None = None
-        if self._total_length(selected) > self.max_context_chars:
+        if total_length > self.max_context_chars:
             overhead = self.max_context_chars // max(len(selected), 1)
             body_limit = max(200, overhead - 40)
             logger.warning(

@@ -2,11 +2,14 @@
 
 设计要点：
 
-* **5 种格式 Loader** 各自只负责一种数据形态，互不耦合；
+* **9 种格式 Loader**：5 种内置格式（文本/JSON/CSV/HTML/PDF，原始读取委托
+  LangChain）+ 4 种扩展格式（Word/Excel/PPT/网页 URL）；
 * :class:`LoaderRegistry` 按后缀自动选 Loader，新增格式只需 ``register``；
-* :class:`DirectoryLoader` 是**组合器**（不是第 6 种格式），递归遍历目录并
-  复用注册表，让「离线索引」可以用一个路径吃下混合语料；
-* 所有 IO 失败统一抛 :class:`LoaderError`，并在消息里带上来源与修复建议。
+* :class:`DirectoryLoader` 是**组合器**，递归遍历目录并复用注册表，
+  让「离线索引」可以用一个路径吃下混合语料；
+* 所有 IO 失败统一抛 :class:`LoaderError`，并在消息里带上来源与修复建议；
+* LangChain 相关组件一律延迟导入；未安装时跳过扩展格式注册，内置格式
+  自动回退零依赖实现，保证模块始终可导入、可用。
 """
 from __future__ import annotations
 
@@ -233,10 +236,14 @@ class DirectoryLoader(DocumentLoader):
 
 
 def build_default_loader_registry(config: LoaderConfig | None = None) -> LoaderRegistry:
-    """构造装有 5 种内置 Loader + 目录组合器的注册表。
+    """构造装有 5 种内置 + 4 种扩展 Loader + 目录组合器的注册表。
 
     延迟 import 各实现模块，避免 ``loaders`` 包自身出现循环导入。
+    注册顺序决定优先级（后注册者优先）：内置 5 种 → 扩展格式 →
+    ``DirectoryLoader`` 最后（目录组合器需复用完整注册表）。
     """
+    import importlib.util
+
     from .csv_loader import CsvLoader
     from .html_loader import HtmlLoader
     from .json_loader import JsonLoader
@@ -245,11 +252,26 @@ def build_default_loader_registry(config: LoaderConfig | None = None) -> LoaderR
 
     cfg = config or LoaderConfig()
     registry = LoaderRegistry(cfg)
-    registry.register(TextLoader(cfg))    # .txt/.md/.log
-    registry.register(JsonLoader(cfg))    # .json/.jsonl/.ndjson
-    registry.register(CsvLoader(cfg))     # .csv/.tsv
-    registry.register(HtmlLoader(cfg))    # .html/.htm
-    registry.register(PdfLoader(cfg))     # .pdf（可选依赖 pypdf）
+    registry.register(TextLoader(cfg))    # .txt/.md/.log（LC TextLoader）
+    registry.register(JsonLoader(cfg))    # .json/.jsonl/.ndjson（LC JSONLoader）
+    registry.register(CsvLoader(cfg))     # .csv/.tsv（LC CSVLoader）
+    registry.register(HtmlLoader(cfg))    # .html/.htm（LC BSHTMLLoader）
+    registry.register(PdfLoader(cfg))     # .pdf（LC PyPDFLoader）
+
+    # 扩展格式依赖 langchain-community 与解析库：仅做 O(1) 探测，不执行包代码。
+    # 未安装时跳过注册，内置 5 种会走各自的零依赖回退路径，模块仍可用。
+    if importlib.util.find_spec("langchain_community") is not None:
+        from .langchain_loader import ExcelLoader, PptLoader, WebLoader, WordLoader
+        registry.register(WordLoader(cfg))    # .docx/.doc
+        registry.register(ExcelLoader(cfg))   # .xlsx/.xls
+        registry.register(PptLoader(cfg))     # .pptx
+        registry.register(WebLoader(cfg))     # http/https URL
+    else:
+        logger.warning(
+            "未检测到 langchain-community，跳过 Word/Excel/PPT/Web 扩展格式注册；"
+            "内置 5 种 Loader 将回退零依赖实现。"
+        )
+
     registry.register(DirectoryLoader(registry, cfg))
     return registry
 

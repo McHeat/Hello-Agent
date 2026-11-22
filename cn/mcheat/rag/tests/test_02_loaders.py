@@ -1,21 +1,32 @@
-"""5 种 Document Loader、注册表分发、编码回退与错误处理。"""
+"""Loader 基线断言（15 个，逐字不变）+ 扩展格式与委托层补充用例。"""
 from __future__ import annotations
 
+import importlib.util
+import io
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from cn.mcheat.rag.config import LoaderConfig
 from cn.mcheat.rag.core.interfaces import DocumentLoader
-from cn.mcheat.rag.exceptions import DependencyMissingError, UnsupportedSourceError
+from cn.mcheat.rag.exceptions import (
+    DependencyMissingError,
+    LoaderError,
+    UnsupportedSourceError,
+)
 from cn.mcheat.rag.loaders import (
     CsvLoader,
     DirectoryLoader,
+    ExcelLoader,
     HtmlLoader,
     JsonLoader,
     LoaderRegistry,
     PdfLoader,
+    PptLoader,
     TextLoader,
+    WebLoader,
+    WordLoader,
     build_default_loader_registry,
     read_text_file,
 )
@@ -164,6 +175,127 @@ class TestLoaders(unittest.TestCase):
         (self.root / ".hidden" / "a.txt").write_text("隐藏文件", encoding="utf-8")
         docs = self.registry.load(self.root)
         self.assertEqual(len(docs), 0)
+
+
+class TestLangChainLoaders(unittest.TestCase):
+    """扩展格式与委托层补充用例（无网络请求；缺解析库时自动跳过）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, name: str, data: bytes) -> Path:
+        path = self.root / name
+        path.write_bytes(data)
+        return path
+
+    def test_web_loader_only_matches_http_urls(self):
+        loader = WebLoader()
+        self.assertTrue(loader.supports("https://example.com/page"))
+        self.assertTrue(loader.supports("http://example.com"))
+        self.assertFalse(loader.supports("ftp://example.com"))
+        self.assertFalse(loader.supports(str(self.root / "a.txt")))
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("langchain_community") is not None,
+        "langchain-community 未安装，扩展格式未注册",
+    )
+    def test_registry_dispatches_url_to_web_loader(self):
+        registry = build_default_loader_registry()
+        self.assertIsInstance(
+            registry.for_source("https://example.com/page"), WebLoader
+        )
+
+    @unittest.skipUnless(
+        all(importlib.util.find_spec(module) is not None
+            for module in ("langchain_community", "docx2txt")),
+        "Word 解析依赖未安装",
+    )
+    def test_word_loader_docx(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "word/document.xml",
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+                'wordprocessingml/2006/main"><w:body><w:p><w:r>'
+                '<w:t>Word 正文内容</w:t></w:r></w:p></w:body></w:document>',
+            )
+        path = self._write("sample.docx", buffer.getvalue())
+        documents = WordLoader().load(path)
+        self.assertGreaterEqual(len(documents), 1)
+        self.assertIn("Word 正文", documents[0].page_content)
+        self.assertEqual(documents[0].metadata["doc_type"], "word")
+        self.assertEqual(documents[0].metadata["source"], str(path.resolve()))
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("openpyxl") is not None, "openpyxl 未安装"
+    )
+    def test_excel_loader_one_document_per_row(self):
+        from openpyxl import Workbook
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["name", "price"])
+        sheet.append(["甲", 10])
+        sheet.append(["乙", 20])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        path = self._write("sample.xlsx", buffer.getvalue())
+        documents = ExcelLoader().load(path)
+        self.assertEqual(len(documents), 2)
+        self.assertEqual([d.metadata["row_index"] for d in documents], [0, 1])
+        self.assertIn("name: 甲", documents[0].page_content)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("pptx") is not None, "python-pptx 未安装"
+    )
+    def test_ppt_loader_one_document_per_slide(self):
+        from pptx import Presentation
+        presentation = Presentation()
+        for text in ("第一页正文", "第二页正文"):
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            slide.shapes.add_textbox(0, 0, 100, 100).text_frame.text = text
+        buffer = io.BytesIO()
+        presentation.save(buffer)
+        path = self._write("sample.pptx", buffer.getvalue())
+        documents = PptLoader().load(path)
+        self.assertEqual(len(documents), 2)
+        self.assertEqual(documents[0].metadata["page_number"], 1)
+        self.assertEqual(documents[1].metadata["total_pages"], 2)
+
+    def test_unknown_exception_is_wrapped_as_loader_error(self):
+        def broken_extractor(_path):
+            raise RuntimeError("解析器内部崩溃")
+
+        path = self._write("broken.pdf", b"%PDF-1.4 fake")
+        with self.assertRaises(LoaderError) as ctx:
+            PdfLoader(text_extractor=broken_extractor).load(path)
+        self.assertIn(str(path), str(ctx.exception))
+        self.assertIn("RuntimeError", str(ctx.exception))
+
+    def test_dependency_hint_for_new_formats(self):
+        error = DependencyMissingError("docx2txt", "Word 文档加载")
+        self.assertIn("pip install docx2txt", str(error))
+
+    def test_metadata_source_is_normalized(self):
+        self._write("a.txt", "纯文本内容足够长可以进索引。".encode("utf-8"))
+        self._write("b.json", '[{"x": "JSON 正文足够长"}]'.encode("utf-8"))
+        self._write("c.csv", "col\n值足够长可以进索引\n".encode("utf-8"))
+        self._write(
+            "d.html",
+            "<html><body><p>HTML 正文足够长</p></body></html>".encode("utf-8"),
+        )
+        registry = build_default_loader_registry()
+        for path in sorted(self.root.iterdir()):
+            for document in registry.load(path):
+                metadata = document.metadata
+                self.assertEqual(metadata["source"], str(path.resolve()))
+                self.assertEqual(metadata["filename"], path.name)
+                self.assertEqual(metadata["suffix"], path.suffix)
+                self.assertIn("doc_type", metadata)
 
 
 if __name__ == "__main__":

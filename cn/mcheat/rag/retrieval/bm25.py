@@ -14,10 +14,14 @@ BM25 擅长精确词/术语匹配（型号、错误码、专有名词），两�
 
 其中 :math:`IDF(t) = \\ln\\left(1 + \\frac{N - df(t) + 0.5}{df(t) + 0.5}\\right)`
 （加 1 平滑，保证 IDF 非负，避免罕见词把分数压成负数）。
+
+所有读写都在 ``RLock`` 内完成，供 ``parallel_recall`` 并发使用。P2 才把
+这里的线性 tf 扫描换成真倒排索引 + 停用词。
 """
 from __future__ import annotations
 
 import math
+import threading
 from typing import Any, Sequence
 
 from .._utils import get_logger, tokenize
@@ -48,55 +52,61 @@ class BM25Index(RecallRetriever):
         self._lengths: dict[str, int] = {}         # chunk_id -> 词元总数
         self._df: dict[str, int] = {}              # term -> 包含该词的文档数
         self._avgdl: float = 0.0
+        self._lock = threading.RLock()
 
     # -- 离线写入 -----------------------------------------------------------
 
     def index(self, chunks: Sequence[ChildChunk]) -> int:
-        for chunk in chunks:
-            tokens = tokenize(chunk.text)
-            counts: dict[str, int] = {}
-            for token in tokens:
-                counts[token] = counts.get(token, 0) + 1
-            old_terms = set(self._tf.get(chunk.id, {}))
-            self._remove_df(old_terms)  # upsert：先撤销旧统计，避免 df 虚高
-            self._chunks[chunk.id] = chunk
-            self._tf[chunk.id] = counts
-            self._lengths[chunk.id] = len(tokens)
-            for term in counts:
-                self._df[term] = self._df.get(term, 0) + 1
-        self._recompute_avgdl()
-        logger.debug("BM25 索引写入 %d 条，当前 %d 条", len(chunks), self.count())
-        return len(chunks)
+        with self._lock:
+            for chunk in chunks:
+                tokens = tokenize(chunk.text)
+                counts: dict[str, int] = {}
+                for token in tokens:
+                    counts[token] = counts.get(token, 0) + 1
+                old_terms = set(self._tf.get(chunk.id, {}))
+                self._remove_df(old_terms)  # upsert：先撤销旧统计，避免 df 虚高
+                self._chunks[chunk.id] = chunk
+                self._tf[chunk.id] = counts
+                self._lengths[chunk.id] = len(tokens)
+                for term in counts:
+                    self._df[term] = self._df.get(term, 0) + 1
+            self._recompute_avgdl()
+            logger.debug("BM25 索引写入 %d 条，当前 %d 条",
+                         len(chunks), self.count())
+            return len(chunks)
 
     # -- 在线检索 -----------------------------------------------------------
 
     def search(self, query: str, k: int,
                metadata_filter: dict[str, Any] | None = None) -> list[Hit]:
-        if k <= 0 or not self._chunks:
+        if k <= 0:
             return []
         query_terms = set(tokenize(query))
         if not query_terms:
             return []
+        with self._lock:
+            if not self._chunks:
+                return []
+            total_docs = len(self._chunks)
+            scores: list[tuple[float, str]] = []
+            for chunk_id, counts in self._tf.items():
+                chunk = self._chunks[chunk_id]
+                if metadata_filter and not all(
+                    chunk.metadata.get(key) == value
+                    for key, value in metadata_filter.items()
+                ):
+                    continue
+                score = self._score(query_terms, counts, chunk_id, total_docs)
+                if score > 0.0:
+                    scores.append((score, chunk_id))
 
-        total_docs = len(self._chunks)
-        scores: list[tuple[float, str]] = []
-        for chunk_id, counts in self._tf.items():
-            chunk = self._chunks[chunk_id]
-            if metadata_filter and not all(
-                chunk.metadata.get(key) == value
-                for key, value in metadata_filter.items()
-            ):
-                continue
-            score = self._score(query_terms, counts, chunk_id, total_docs)
-            if score > 0.0:
-                scores.append((score, chunk_id))
-
-        # 分数降序 + ID 兜底排序，结果可复现
-        scores.sort(key=lambda item: (-item[0], item[1]))
-        return [
-            Hit(chunk=self._chunks[chunk_id], score=float(score), source="sparse")
-            for score, chunk_id in scores[:k]
-        ]
+            # 分数降序 + ID 兜底排序，结果可复现
+            scores.sort(key=lambda item: (-item[0], item[1]))
+            return [
+                Hit(chunk=self._chunks[chunk_id], score=float(score),
+                    source="sparse")
+                for score, chunk_id in scores[:k]
+            ]
 
     def _score(self, query_terms: set[str], counts: dict[str, int],
                chunk_id: str, total_docs: int) -> float:
@@ -116,24 +126,37 @@ class BM25Index(RecallRetriever):
     # -- 维护 ---------------------------------------------------------------
 
     def delete(self, ids: Sequence[str]) -> int:
-        removed = 0
-        for chunk_id in ids:
-            if chunk_id not in self._chunks:
-                continue
-            self._remove_df(set(self._tf.get(chunk_id, {})))
-            self._chunks.pop(chunk_id, None)
-            self._tf.pop(chunk_id, None)
-            self._lengths.pop(chunk_id, None)
-            removed += 1
-        if removed:
-            self._recompute_avgdl()
-        return removed
+        with self._lock:
+            removed = 0
+            for chunk_id in ids:
+                if chunk_id not in self._chunks:
+                    continue
+                self._remove_df(set(self._tf.get(chunk_id, {})))
+                self._chunks.pop(chunk_id, None)
+                self._tf.pop(chunk_id, None)
+                self._lengths.pop(chunk_id, None)
+                removed += 1
+            if removed:
+                self._recompute_avgdl()
+            return removed
+
+    def delete_by_source(self, source: str) -> int:
+        """按来源删除（默认钩子的实质实现，非增量路径必需依赖）。"""
+        with self._lock:
+            matched = [
+                chunk_id for chunk_id, chunk in self._chunks.items()
+                if source in {chunk.metadata.get("source"),
+                              chunk.metadata.get("filename")}
+            ]
+            return self.delete(matched)
 
     def ids(self) -> set[str]:
-        return set(self._chunks)
+        with self._lock:
+            return set(self._chunks)
 
     def count(self) -> int:
-        return len(self._chunks)
+        with self._lock:
+            return len(self._chunks)
 
     def _remove_df(self, terms: set[str]) -> None:
         for term in terms:
@@ -152,36 +175,38 @@ class BM25Index(RecallRetriever):
     # -- 持久化 -------------------------------------------------------------
 
     def export_state(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "k1": self.k1,
-            "b": self.b,
-            "documents": [
-                {
-                    "chunk": self._chunks[chunk_id].to_dict(),
-                    "tf": self._tf[chunk_id],
-                    "length": self._lengths[chunk_id],
-                }
-                for chunk_id in sorted(self._chunks)
-            ],
-        }
+        with self._lock:
+            return {
+                "version": 1,
+                "k1": self.k1,
+                "b": self.b,
+                "documents": [
+                    {
+                        "chunk": self._chunks[chunk_id].to_dict(),
+                        "tf": self._tf[chunk_id],
+                        "length": self._lengths[chunk_id],
+                    }
+                    for chunk_id in sorted(self._chunks)
+                ],
+            }
 
     def import_state(self, state: dict[str, Any]) -> None:
-        self.k1 = float(state.get("k1", self.k1))
-        self.b = float(state.get("b", self.b))
-        self._chunks.clear()
-        self._tf.clear()
-        self._lengths.clear()
-        self._df.clear()
-        for record in state.get("documents", []):
-            chunk = ChildChunk.from_dict(record["chunk"])
-            counts = dict(record["tf"])
-            self._chunks[chunk.id] = chunk
-            self._tf[chunk.id] = counts
-            self._lengths[chunk.id] = int(record["length"])
-            for term in counts:
-                self._df[term] = self._df.get(term, 0) + 1
-        self._recompute_avgdl()
+        with self._lock:
+            self.k1 = float(state.get("k1", self.k1))
+            self.b = float(state.get("b", self.b))
+            self._chunks.clear()
+            self._tf.clear()
+            self._lengths.clear()
+            self._df.clear()
+            for record in state.get("documents", []):
+                chunk = ChildChunk.from_dict(record["chunk"])
+                counts = dict(record["tf"])
+                self._chunks[chunk.id] = chunk
+                self._tf[chunk.id] = counts
+                self._lengths[chunk.id] = int(record["length"])
+                for term in counts:
+                    self._df[term] = self._df.get(term, 0) + 1
+            self._recompute_avgdl()
 
 
 __all__: Sequence[str] = ["BM25Index"]

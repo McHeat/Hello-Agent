@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Sequence
 
 from .._utils import get_logger
@@ -141,11 +142,17 @@ class HybridRetriever:
         dense / sparse: 两路 :class:`RecallRetriever`。
         fusion: 融合策略。
         enable_dense / enable_sparse: 消融开关。
+        parallel_recall: 是否用 ``ThreadPoolExecutor`` 并行两路（**默认关闭**，
+            D10：默认栈两路都是纯 Python CPU-bound，受 GIL 限制并行无收益；
+            仅 I/O-bound 的 API embedder / 生产档显式开启）。
+        recall_timeout_s: 并行模式单路超时；超时按单路失败降级。
     """
 
     def __init__(self, dense: RecallRetriever, sparse: RecallRetriever,
                  fusion: FusionStrategy, enable_dense: bool = True,
-                 enable_sparse: bool = True) -> None:
+                 enable_sparse: bool = True,
+                 parallel_recall: bool = False,
+                 recall_timeout_s: float = 5.0) -> None:
         if not (enable_dense or enable_sparse):
             raise RetrievalError("粗召回两条通路都被关闭")
         self.dense = dense
@@ -153,6 +160,8 @@ class HybridRetriever:
         self.fusion = fusion
         self.enable_dense = enable_dense
         self.enable_sparse = enable_sparse
+        self.parallel_recall = parallel_recall
+        self.recall_timeout_s = recall_timeout_s
 
     def recall(
         self,
@@ -191,23 +200,25 @@ class HybridRetriever:
         if self.enable_sparse:
             paths.append(("sparse", self.sparse, sparse_k))
 
+        outcomes = self._search_paths(paths, query, metadata_filter)
         failures = 0
-        for source, retriever, k in paths:
-            try:
-                hits: list[Hit] = retriever.search(query, k, metadata_filter)
-                rankings.append(Ranking(source=source, hits=hits))
-                diagnostics["per_path"][source] = {
-                    "count": len(hits),
-                    "top_score": hits[0].score if hits else 0.0,
-                }
-            except Exception as exc:
+        # 按 paths 的原始顺序处理，保证 diagnostics.per_path 与 Ranking 顺序确定
+        for source, hits in outcomes:
+            if isinstance(hits, Exception):
                 failures += 1
                 diagnostics["degraded"] = True
                 diagnostics["per_path"][source] = {
                     "count": 0,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": f"{type(hits).__name__}: {hits}",
                 }
-                logger.warning("粗召回通路 %s 失败，继续用其余通路：%s", source, exc)
+                logger.warning("粗召回通路 %s 失败，继续用其余通路：%s",
+                               source, hits)
+                continue
+            rankings.append(Ranking(source=source, hits=hits))
+            diagnostics["per_path"][source] = {
+                "count": len(hits),
+                "top_score": hits[0].score if hits else 0.0,
+            }
 
         if failures == len(paths):
             raise EmptyRecallError(
@@ -218,6 +229,45 @@ class HybridRetriever:
         diagnostics["fused_count"] = len(fused)
         diagnostics["fusion"] = self.fusion.name
         return fused, diagnostics
+
+    def _search_paths(
+        self,
+        paths: list[tuple[str, RecallRetriever, int]],
+        query: str,
+        metadata_filter: dict[str, Any] | None,
+    ) -> list[tuple[str, list[Hit] | Exception]]:
+        """串行或并行执行两路召回，返回值顺序与 ``paths`` 严格一致。"""
+        if not self.parallel_recall or len(paths) == 1:
+            outcomes: list[tuple[str, list[Hit] | Exception]] = []
+            for source, retriever, k in paths:
+                try:
+                    outcomes.append((source, retriever.search(
+                        query, k, metadata_filter
+                    )))
+                except Exception as exc:
+                    outcomes.append((source, exc))
+            return outcomes
+
+        with ThreadPoolExecutor(max_workers=len(paths)) as executor:
+            futures = [
+                (source, executor.submit(
+                    retriever.search, query, k, metadata_filter
+                ))
+                for source, retriever, k in paths
+            ]
+            results: list[tuple[str, list[Hit] | Exception]] = []
+            for source, future in futures:
+                try:
+                    results.append((source, future.result(
+                        timeout=self.recall_timeout_s
+                    )))
+                except TimeoutError as exc:
+                    results.append((source, TimeoutError(
+                        f"并行召回超时（>{self.recall_timeout_s}s）：{exc}"
+                    )))
+                except Exception as exc:
+                    results.append((source, exc))
+            return results
 
 
 __all__: Sequence[str] = ["RRFFusion", "WeightedSumFusion", "HybridRetriever"]

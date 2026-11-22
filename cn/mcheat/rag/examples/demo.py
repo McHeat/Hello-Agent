@@ -67,6 +67,22 @@ def main() -> None:
     print(f"  回答内容 : {fallback_result.fallback.message}")
     print(f"  是否禁止调用 LLM : {not fallback_result.answer_ready}")
 
+    _section("归一化分、拒答判定与阶段耗时（P0/P1 新增）")
+    print(f"  final[].score ∈ [0,1]：{[round(item.score, 4) for item in result.final]}")
+    print("  final[].raw_score（精排原始分）：",
+          [round(item.raw_score, 4) for item in result.final])
+    print("  coarse[].score 仍是 RRF 融合域：",
+          [round(item.score, 4) for item in result.coarse[:3]])
+    refused = system.retrieve("帕米尔高原雪豹栖息地海拔范围与冬季觅食习性")
+    print(f"  无关查询是否拒答：{not refused.answer_ready}，动作={refused.fallback.final_action}，"
+          f"prompt 长度={len(refused.prompt)}")
+    print(f"  质量门禁暂行阈值：{system.config.retrieval.min_best_score}"
+          "（Golden Set 扩至 30~50 条后须复标）")
+    print(f"  阶段耗时(ms)：{result.diagnostics['stage_timings_ms']}")
+    print(f"  查询变体数：{len(result.diagnostics['query_variants'])}，"
+          f"缓存命中：{result.diagnostics['cache_hit']}，"
+          f"index_version：{result.diagnostics['index_version']}")
+
     _section("注意事项 4：Golden Set 回归，Recall / Precision 分阶段量化")
     report = system.evaluate(GOLDEN_SET)
     print(f"  Golden Set: {report.golden_set}，{len(report.cases)} 条标注")

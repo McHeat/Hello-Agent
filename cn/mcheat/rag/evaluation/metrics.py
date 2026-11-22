@@ -130,14 +130,54 @@ def compute_all(ranked: Sequence[str], relevant: Iterable[str]) -> dict[str, flo
     }
 
 
+# --- 拒答指标（P0-1 阈值标定 / P1-3 门禁）--------------------------------
+#
+# outcomes: [(should_refuse, refused), ...]
+#   should_refuse = 不是可回答样本（GoldenCase.should_refuse）
+#   refused       = 检索链路判定不允许生成答案（not RetrievalResult.answer_ready）
+
+
+def false_refusal_rate(outcomes: Sequence[tuple[bool, bool]]) -> float:
+    """误杀率：可回答样本里被拒答的比例（越低越好）。"""
+    answerable = [refused for should_refuse, refused in outcomes
+                  if not should_refuse]
+    return sum(bool(item) for item in answerable) / len(answerable) \
+        if answerable else 0.0
+
+
+def false_accept_rate(outcomes: Sequence[tuple[bool, bool]]) -> float:
+    """误接受率：应拒答样本里仍生成 prompt 的比例（越低越好）。"""
+    negatives = [not refused for should_refuse, refused in outcomes
+                 if should_refuse]
+    return sum(bool(item) for item in negatives) / len(negatives) \
+        if negatives else 0.0
+
+
+def refusal_accuracy(outcomes: Sequence[tuple[bool, bool]]) -> float:
+    """拒答准确率：正确接受 / 正确拒绝占全部样本的比例（越高越好）。"""
+    if not outcomes:
+        return 0.0
+    correct = sum(should_refuse == bool(refused)
+                  for should_refuse, refused in outcomes)
+    return correct / len(outcomes)
+
+
 # 回归门禁只比较这几项（其余指标用于人工分析，不设硬门槛）
 GATED_METRICS: tuple[str, ...] = (
     "context_recall", "context_precision", "average_precision", "hit_rate",
+    "false_refusal_rate", "false_accept_rate", "refusal_accuracy",
 )
+
+# 「越低越好」的门禁指标：回归判定方向与其它指标相反
+LOWER_IS_BETTER_METRICS: frozenset[str] = frozenset({
+    "false_refusal_rate", "false_accept_rate",
+})
 
 
 __all__: Sequence[str] = [
     "dedupe_preserve_order", "context_recall", "context_precision",
     "precision_at_k", "average_precision", "reciprocal_rank", "hit_rate",
     "f1_score", "compute_all", "GATED_METRICS",
+    "false_refusal_rate", "false_accept_rate", "refusal_accuracy",
+    "LOWER_IS_BETTER_METRICS",
 ]

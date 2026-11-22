@@ -27,7 +27,16 @@ from ..config import EvaluationConfig
 from ..exceptions import EvaluationError, PersistenceError
 from ..models import RetrievalResult, ScoredChunk
 from .golden import GoldenSet
-from .metrics import GATED_METRICS, compute_all, context_precision, context_recall
+from .metrics import (
+    GATED_METRICS,
+    LOWER_IS_BETTER_METRICS,
+    compute_all,
+    context_precision,
+    context_recall,
+    false_accept_rate,
+    false_refusal_rate,
+    refusal_accuracy,
+)
 
 if TYPE_CHECKING:  # 仅类型标注，避免与 api.RAGSystem 形成运行时循环导入
     from ..api import RAGSystem
@@ -82,6 +91,8 @@ class CaseResult:
     precision_metrics: dict[str, float]
     action: str
     answer_ready: bool
+    answerable: bool = True
+    should_refuse: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +104,8 @@ class CaseResult:
             "precision_metrics": self.precision_metrics,
             "action": self.action,
             "answer_ready": self.answer_ready,
+            "answerable": self.answerable,
+            "should_refuse": self.should_refuse,
         }
 
 
@@ -158,11 +171,14 @@ class EvalReport:
         deltas: dict[str, float] = {}
         failed: list[str] = []
         for metric in GATED_METRICS:
+            # 旧 baseline.json 缺新增的拒答指标时跳过比较，不会误判回归
             if metric not in base_summary or metric not in self.summary:
                 continue
             delta = self.summary[metric] - float(base_summary[metric])
             deltas[metric] = round(delta, 6)
-            if delta < -abs(max_drop):
+            regressed = (delta > abs(max_drop) if metric in LOWER_IS_BETTER_METRICS
+                         else delta < -abs(max_drop))
+            if regressed:
                 failed.append(f"{metric}: {delta:+.4f}")
         passed = not failed
         message = (
@@ -242,25 +258,41 @@ class EvalRunner:
                 precision_metrics=precision_metrics,
                 action=result.fallback.final_action,
                 answer_ready=result.answer_ready,
+                answerable=case.answerable,
+                should_refuse=case.should_refuse,
             ))
 
         if not cases:
             raise EvaluationError("Golden Set 为空，无法生成评测报告")
 
-        # 汇总：粗召回阶段的 Recall + 精排阶段的 Precision/AP/...
+        # 汇总：负样本不参与 Recall / Precision 均值（没有相关标注，
+        # 这些指标对它无定义）；拒答指标则覆盖全部样本。
         def mean(values: list[float]) -> float:
             return sum(values) / len(values) if values else 0.0
 
+        answerable_cases = [case for case in cases if case.answerable]
         summary: dict[str, float] = {
-            "context_recall": mean([c.recall_metrics["context_recall"] for c in cases]),
-            "recall_hit_rate": mean([c.recall_metrics["hit_rate"] for c in cases]),
+            "context_recall": mean([
+                c.recall_metrics["context_recall"] for c in answerable_cases
+            ]),
+            "recall_hit_rate": mean([
+                c.recall_metrics["hit_rate"] for c in answerable_cases
+            ]),
         }
         for metric in ("context_precision", "average_precision",
                        "precision_at_3", "reciprocal_rank", "hit_rate", "f1"):
-            summary[metric] = mean([c.precision_metrics[metric] for c in cases])
+            summary[metric] = mean([
+                c.precision_metrics[metric] for c in answerable_cases
+            ])
         summary["answer_ready_rate"] = mean(
             [1.0 if c.answer_ready else 0.0 for c in cases]
         )
+        outcomes = [
+            (c.should_refuse, not c.answer_ready) for c in cases
+        ]
+        summary["false_refusal_rate"] = false_refusal_rate(outcomes)
+        summary["false_accept_rate"] = false_accept_rate(outcomes)
+        summary["refusal_accuracy"] = refusal_accuracy(outcomes)
         summary = {key: round(value, 6) for key, value in summary.items()}
 
         report = EvalReport(
