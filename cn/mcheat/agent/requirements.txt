@@ -1,0 +1,13 @@
+# agent 框架依赖（主项目 requirements.txt 已包含，此处用于独立复现）
+#
+# 硬依赖（图编排 + LLM 抽象）：
+langgraph>=1.0            # StateGraph / interrupt / Command / MemorySaver
+langchain-core>=0.3       # BaseChatModel / @tool（langgraph 自身也依赖它）
+#
+# 可选（按需启用）：
+# langgraph-checkpoint-sqlite>=2.0   # sqlite checkpointer（checkpointer.name="sqlite"）
+#                                     安装：pip install langgraph-checkpoint-sqlite
+# langgraph-checkpoint-postgres>=2.0 # postgres checkpointer（生产多进程部署）
+#
+# LLM 厂商 SDK 不在此列：模型实例由调用方注入
+#（示例用根目录 llm.py 工厂，Anthropic/OpenAI 由根 requirements.txt 提供）。

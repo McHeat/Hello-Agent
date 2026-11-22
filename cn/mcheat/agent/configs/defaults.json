@@ -1,0 +1,59 @@
+{
+  "_comment": "默认配置：唯一的参数入口。优先级 defaults.json < 用户 JSON < AGENT_* 环境变量 < overrides 字典。params 里的 \"@xxx\" 是已构建组件的依赖引用。",
+  "version": 1,
+  "components": {
+    "llm": {
+      "name": "langchain",
+      "params": {},
+      "_note": "LangChainLLMClient 适配器。模型实例通常由调用方注入：PythonTutorAgent(llm=get_model())；配置驱动仅用于注册自定义 LLMClient 工厂的场景。"
+    },
+    "intent_classifier": {
+      "name": "llm",
+      "params": { "llm": "@llm" }
+    },
+    "knowledge_base": {
+      "name": "memory",
+      "params": {},
+      "_note": "内置本地语法知识库；可替换为向量检索实现（注册到 KNOWLEDGE_BASE_REGISTRY 后改 name）。"
+    },
+    "env_probe": {
+      "name": "local",
+      "params": {},
+      "_note": "timeout / include_pip_list / pip_list_limit 的默认值以顶层 env_probe 配置为准；装配期会自动注入到 local 实现的构造参数。"
+    },
+    "skill_syntax": {
+      "name": "syntax",
+      "params": { "llm": "@llm", "knowledge_base": "@knowledge_base" }
+    },
+    "skill_env": {
+      "name": "environment",
+      "params": { "llm": "@llm", "env_probe": "@env_probe" }
+    },
+    "skill_review": {
+      "name": "review",
+      "params": { "llm": "@llm" }
+    },
+    "checkpointer": {
+      "name": "memory",
+      "params": {},
+      "_note": "生产建议切换 sqlite（需 pip install langgraph-checkpoint-sqlite）或 postgres。"
+    }
+  },
+  "graph": {
+    "recursion_limit": 25,
+    "max_clarify_turns": 2
+  },
+  "intent": {
+    "system_prompt": "",
+    "history_window": 6
+  },
+  "clarify": {
+    "question_template": "我不太确定你想让我做什么。你是想要：\n{candidates}\n请回复序号（1/2/3），或直接补充说明你的需求。",
+    "exhausted_reply": "抱歉，多轮澄清后仍无法确定你的意图。你可以：\n1) 换个更具体的问法，例如「列表推导式怎么写」；\n2) 直接粘贴一段 Python 代码，我会给出修改指导；\n3) 询问「检测一下我的 Python 环境」，我来检查安装状态。"
+  },
+  "env_probe": {
+    "timeout": 10.0,
+    "include_pip_list": true,
+    "pip_list_limit": 30
+  }
+}
